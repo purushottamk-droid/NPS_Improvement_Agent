@@ -1,0 +1,12 @@
+# ── MCP server framework ────────────────────────────
+mcp
+
+# ── HTTP calls to Salesforce's REST/SOQL API ────────
+httpx
+
+# ── JWT Bearer flow (RS256 signing) ─────────────────
+pyjwt
+cryptography
+
+# ── local .env loading for test_connection.py (dev only) ─
+python-dotenv

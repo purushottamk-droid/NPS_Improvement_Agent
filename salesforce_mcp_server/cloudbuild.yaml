@@ -1,0 +1,11 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - salesforce_mcp_server/Dockerfile
+      - -t
+      - gcr.io/$PROJECT_ID/salesforce-mcp-server-v2
+      - .
+images:
+  - gcr.io/$PROJECT_ID/salesforce-mcp-server-v2
