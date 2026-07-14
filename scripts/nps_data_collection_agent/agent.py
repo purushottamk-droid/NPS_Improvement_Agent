@@ -588,6 +588,9 @@ class NpsAccountContextAgent(BaseAgent):
         yield Event(author=self.name, content=None)
 
 
+nps_data_collection_agent = NpsAccountContextAgent(name="nps_data_collection_agent")
+
+
 # ─────────────────────────────────────────────
 # LOCAL TEST
 # ─────────────────────────────────────────────
