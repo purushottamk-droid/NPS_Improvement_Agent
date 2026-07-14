@@ -5,13 +5,13 @@ import os
 # =========================
 # CONFIG
 # =========================
-CLIENT_SECRET_FILE = "client_secret_621913909275-3r6unsmim9jl1p0tm9bbirjapf5p8559.apps.googleusercontent.com.json"
+CLIENT_SECRET_FILE = "client_secret_621913909275-89893b58bm8h3ihusqb5u68r0csir0o2.apps.googleusercontent.com.json"
 OUTPUT_FILE = "oauth_final.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/calendar"
+    # "https://www.googleapis.com/auth/gmail.readonly",
+    # "https://www.googleapis.com/auth/calendar"
 ]
 
 # =========================

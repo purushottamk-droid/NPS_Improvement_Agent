@@ -1,1 +1,4 @@
 .venv
+auth/oauth_final.json
+auth/client_secret_*.json
+.env

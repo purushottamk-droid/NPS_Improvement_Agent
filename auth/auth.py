@@ -17,11 +17,11 @@ OAUTH_FILE = os.path.join(os.path.dirname(__file__), "oauth_final.json")
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
+    # "https://www.googleapis.com/auth/gmail.readonly",
 ]
-CALENDAR_SCOPES = [
-    "https://www.googleapis.com/auth/calendar",
-]
+# CALENDAR_SCOPES = [
+#     "https://www.googleapis.com/auth/calendar",
+# ]
 
 
 def _load_oauth_data() -> dict:
@@ -69,6 +69,6 @@ def build_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
-def build_calendar_service():
-    creds = _get_credentials(CALENDAR_SCOPES)
-    return build("calendar", "v3", credentials=creds)
+# def build_calendar_service():
+#     creds = _get_credentials(CALENDAR_SCOPES)
+#     return build("calendar", "v3", credentials=creds)
