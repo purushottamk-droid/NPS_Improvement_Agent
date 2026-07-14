@@ -15,11 +15,12 @@ class ActionRecord(BaseModel):
         description="Which action this record corresponds to"
     )
 
-    status: Literal["SENT", "ERROR", "SKIPPED"] = Field(
+    status: Literal["GENERATED", "ERROR", "SKIPPED"] = Field(
         description=(
             "Outcome of the action. "
-            "SENT = tool executed successfully. "
-            "ERROR = tool call failed. "
+            "GENERATED = action record produced for UI display (email "
+            "sending/generation is disabled for now — nothing is sent). "
+            "ERROR = action could not be produced. "
             "SKIPPED = required session state value missing, OR account's "
             "risk_level is Low with no action needed."
         )
@@ -39,8 +40,8 @@ class ActionRecord(BaseModel):
     detail: Optional[str] = Field(
         default=None,
         description=(
-            "Extra info about the executed action — e.g. Gmail message_id. "
-            "Null if status is ERROR or SKIPPED."
+            "Extra info about the action — currently the recommended_action "
+            "text from risk classification. Null if status is ERROR or SKIPPED."
         )
     )
 
