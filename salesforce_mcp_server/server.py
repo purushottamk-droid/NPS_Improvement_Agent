@@ -102,22 +102,6 @@ async def get_opportunities_by_account(account_id: str) -> dict:
     records = await _run_soql(build_opportunities_by_account_soql(account_id))
     return {"opportunities": [parse_opportunity_record(r) for r in records]}
 
-@mcp.tool()
-async def debug_list_accounts() -> dict:
-    """TEMP DEBUG TOOL — lists real Account Id + Name from this Salesforce
-    org, to compare against BigQuery's CRM_ID values. Remove once the
-    CRM_ID mapping issue is resolved."""
-    records = await _run_soql("SELECT Id, Name FROM Account LIMIT 50")
-    return {"accounts": records}
-
-@mcp.tool()
-async def debug_list_opportunity_account_ids() -> dict:
-    """TEMP DEBUG TOOL — lists Opportunity Id, Name, and AccountId from this
-    Salesforce org, to confirm AccountId format/values match Account.Id.
-    Remove once the CRM_ID mapping issue is resolved."""
-    records = await _run_soql("SELECT Id, Name, AccountId FROM Opportunity LIMIT 50")
-    return {"opportunities": records}
-
 
 @mcp.tool()
 async def get_cases_by_account(account_id: str) -> dict:

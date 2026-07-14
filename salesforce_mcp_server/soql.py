@@ -38,16 +38,16 @@ FIELD_MAP = {
     "account_id":                    "AccountId",
     "account_name":                  "Account.Name",
     "industry":                      "Account.Industry",
-    "account_segment":               "Account.Segment__c",              # NOT FOUND — no such field in this org
+    "account_segment":               "account_segment__c",              # NOT FOUND — no such field in this org
     "opportunity_type":              "Type",
     "current_stage":                 "StageName",
     "forecast_category":             "ForecastCategoryName",
     "deal_value_arr":                "ARR__c",                          # confirmed via null_check.py — Amount is 100% null in this org, ARR__c is 100% populated
-    "discount_pct":                  "Discount__c",                     # NOT FOUND — no such field in this org
+    "discount_pct":                  "discount_pct__c",                     # NOT FOUND — no such field in this org
     "created_date":                  "CreatedDate",
     "close_date_target":             "CloseDate",
-    "days_open":                     "Days_in_Pipeline__c",             # NOT FOUND — no such field in this org
-    "current_stage_duration_days":   "Days_Since_Last_Activity__c",     # substitute — real Days_in_Stage-equivalent field is 100% null in this org, using Days Since Last Activity as the closest available proxy per user direction
+    "days_open":                     "Days_Open__c",             # NOT FOUND — no such field in this org
+    "current_stage_duration_days":   "current_stage_duration_days__c",     # substitute — real Days_in_Stage-equivalent field is 100% null in this org, using Days Since Last Activity as the closest available proxy per user direction
     "days_since_last_touch":         "Days_Since_Last_Activity__c",     # confirmed
     "next_step":                     "Next_Step__c",                   # confirmed via null_check.py — NextStep is 100% null in this org, Next_Step__c is 100% populated
     "risks":                         "Risks__c",                       # confirmed
@@ -60,6 +60,18 @@ FIELD_MAP = {
     "is_won":                        "IsWon",
     "is_closed":                     "IsClosed",
     "owner_id":                      "OwnerId",                        # NOT usable for per-rep scoping — every Opportunity in this org shares one OwnerId (a shared/integration user). Kept here only so callers can recover a real, valid Salesforce User Id for Task-assignment purposes (see create_task) — Sales_Rep_Name__c has no corresponding Salesforce User record to assign Tasks to instead.
+    "solutions_engineer_notes":      "SE_Notes__c",
+    "competitor":                    "Competitor__c",
+    "win_loss_reason":               "Win_Loss_Reason__c",
+    "win_loss_reason_details":       "Win_Loss_Reason_Detail__c",
+    "sales_manager":                 "Sales_Manager__c",
+    "sales_vp_name":                 "Sales_VP_Name__c",
+    "account_type":                  "Account.Type",
+    "account_geo":                   "Account_Geo__c",
+    "account_region":                "Account_Region__c",
+    "account_subregion":             "Account_SubRegion__c",
+    "account_country":               "Account_Country__c",
+    "bdr":                           "BDR_Name__c",
 }
 
 CASE_FIELD_MAP = {
@@ -94,6 +106,11 @@ CASE_FIELD_MAP = {
     "customer_success_manager":    "Customer_Success_Manager__c",
     "case_owner":                  "Case_Owner__c",
     "sales_rep_name":              "Sales_Rep_Name__c",
+    "sla_status":                 "SLA_Status__c",
+    "comment_count":              "Comment_Count__c",
+    "latest_customer_comment":    "Latest_Customer_Comment__c",
+    "latest_internal_note":       "Latest_Internal_Note__c",
+    "resolution_category":        "Resolution_Category__c",
 }
 
 def build_cases_by_account_soql(account_id: str) -> str:
@@ -115,7 +132,7 @@ _REP_NAME_FIELD = "Sales_Rep_Name__c"
 # (confirmed directly: a real query against this org 400'd until these
 # were excluded), so these must never appear in a SELECT clause. Downstream
 # code still gets these keys via parse_opportunity_record, just always None.
-KNOWN_MISSING_FIELDS = {"account_segment", "discount_pct", "days_open"}
+KNOWN_MISSING_FIELDS = set()
 
 
 def _queryable_fields() -> set[str]:

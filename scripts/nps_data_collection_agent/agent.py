@@ -102,11 +102,10 @@ async def _get_gcp_identity_token(audience: str) -> str:
     using this pipeline's Application Default Credentials — required
     because salesforce_mcp_server is deployed with --no-allow-unauthenticated.
     """
-    # loop = asyncio.get_event_loop()
-    # return await loop.run_in_executor(
-    #     None, id_token.fetch_id_token, google_auth_requests.Request(), audience
-    # )
-    return "local-dev-dummy-token"
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, id_token.fetch_id_token, google_auth_requests.Request(), audience
+    )
 
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict:
     """
@@ -176,13 +175,19 @@ def _fetch_survey_responses_sync() -> list[dict]:
             r.COMMENT         AS comment,
             s.IS_ACTIVE       AS survey_is_active,
             s.NAME            AS survey_name,
-            s.TYPE            AS survey_definition_type
+            s.TYPE            AS survey_definition_type,
+            s.QUESTION                AS question,
+            s.CAMPAIGN_STATUS         AS campaign_status,
+            s.RECURRING_EVERY_MONTH   AS recurring_every_month,
+            s.CAMPAIGN_TYPE           AS campaign_type,
+            r.FOLLOW_UP_RESPONSE      AS follow_up_response,
+            r.FOLLOW_UP_QUESTION      AS follow_up_question,
         FROM `{TABLE_SURVEY_RESPONSE}` r
         LEFT JOIN `{TABLE_SURVEY}` s
             ON r.SURVEY_ID = s.ID
         WHERE r._FIVETRAN_DELETED IS NOT TRUE
         ORDER BY r.DATE DESC
-        LIMIT 5
+        LIMIT 30
     """
     rows = [dict(row) for row in client.query(query).result()]
     return rows
@@ -212,7 +217,8 @@ def _fetch_accounts_by_id_sync(churnzero_account_ids: list[int]) -> dict[int, di
             TENURE_IN_DAYS,
             PRIMARY_CHURN_SCORE_VALUE,
             NEXT_RENEWAL_DATE,
-            TOTAL_CONTRACT_AMOUNT
+            TOTAL_CONTRACT_AMOUNT,
+            USAGE_FREQUENCY,
         FROM `{TABLE_ACCOUNT}`
         WHERE ID IN UNNEST(@account_ids)
           AND _FIVETRAN_DELETED IS NOT TRUE
@@ -246,7 +252,13 @@ def _fetch_gong_by_account_ids_sync(crm_account_ids: list[str]) -> dict[str, lis
             CALL_OUTCOME_NAME,
             PRIMARY_OBJECTION,
             NEXT_STEP,
-            KEY_MEETING_DISCUSSIONS
+            KEY_MEETING_DISCUSSIONS,
+            CUSTOM_DATA,
+            BRIEF,
+            CALL_OUTCOME_CATEGORY,
+            SALES_REP_ID,
+            SALES_REP_NAME,
+            SALES_REP_EMAIL,
         FROM `{TABLE_GONG}`
         WHERE ACCOUNT_ID IN UNNEST(@account_ids)
           AND STARTED >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
@@ -331,6 +343,7 @@ def build_gong_summary(calls: list[dict]) -> dict:
     return {
         "recent_calls_count": len(calls),
         "recent_sentiment": recent_sentiment,
+        "recent_calls": calls  # This injects all the new Gong fields directly
     }
 
 
@@ -356,6 +369,24 @@ def build_case_summary(cases: list[dict]) -> dict:
                 "nps_risk_reason": c.get("nps_risk_reason"),
                 "recommended_agent_action": c.get("recommended_agent_action"),
                 "date_time": c.get("created_date"),
+                "case_number": c.get("case_number"),
+                "case_type": c.get("case_type"),
+                "product_area": c.get("product_area"),
+                "description": c.get("description"),
+                "first_response_date": c.get("first_response_date"),
+                "last_interaction_date": c.get("last_interaction_date"),
+                "closed_date": c.get("closed_date"),
+                "sla_status": c.get("sla_status"),
+                "escalation_level": c.get("escalation_level"),
+                "comment_count": c.get("comment_count"),
+                "latest_customer_comment": c.get("latest_customer_comment"),
+                "latest_internal_note": c.get("latest_internal_note"),
+                "resolution_category": c.get("resolution_category"),
+                "resolution_summary": c.get("resolution_summary"),
+                "customer_health": c.get("customer_health"),
+                "customer_success_manager": c.get("customer_success_manager"),
+                "case_owner": c.get("case_owner"),
+                "sales_rep_name": c.get("sales_rep_name"),
             }
             for c in open_cases[:MAX_OPEN_CASES_PER_ACCOUNT]
         ],
@@ -385,6 +416,24 @@ def build_opportunity_summary(opportunities: list[dict]) -> dict:
                 "risks": o.get("risks"),
                 "cbi_raw_text": o.get("cbi_raw_text"),
                 "opportunity_manager_notes": o.get("opportunity_manager_notes"),
+                "deal_size": o.get("deal_value_arr"), 
+                "closed_date": o.get("close_date_target"),
+                "created_date": o.get("created_date"),
+                "solutions_engineer_notes": o.get("solutions_engineer_notes"),
+                "competitor": o.get("competitor"),
+                "win_loss_reason": o.get("win_loss_reason"),
+                "win_loss_reason_details": o.get("win_loss_reason_details"),
+                "sales_rep_name": o.get("sales_rep_name"),
+                "sales_manager": o.get("sales_manager"),
+                "sales_vp_name": o.get("sales_vp_name"),
+                "account_type": o.get("account_type"),
+                "account_segment": o.get("account_segment"),
+                "account_geo": o.get("account_geo"),
+                "account_region": o.get("account_region"),
+                "account_subregion": o.get("account_subregion"),
+                "account_country": o.get("account_country"),
+                "account_industry": o.get("industry"),
+                "bdr": o.get("bdr"),
             }
             for o in open_opps
         ],
@@ -406,17 +455,28 @@ def build_account_context(
         "account_name": account_row.get("NAME") if account_row else None,
         "survey": {
             "response_id": survey_row.get("response_id"),
+            "survey_id": survey_row.get("survey_id"),
+            "name": survey_row.get("survey_name"),
             "type": survey_type,
+            "campaign_type": survey_row.get("campaign_type"),
+            "campaign_status": survey_row.get("campaign_status"),
+            "question": survey_row.get("question"),
+            "recurring_every_month": survey_row.get("recurring_every_month"),
             "score": score,
             "label": label_for_score(score),
             "date": survey_row["survey_response_date"].isoformat() if survey_row.get("survey_response_date") else None,
             "comment": survey_row.get("comment"),
+            "follow_up_question": survey_row.get("follow_up_question"),
+            "follow_up_response": survey_row.get("follow_up_response"),
         },
         "churn": {
+            "account_name": account_row.get("NAME") if account_row else None,
             "is_active": account_row.get("IS_ACTIVE") if account_row else None,
             "is_churn_account": (account_row.get("IS_ACTIVE") is False) if account_row else None,
             "tenure_in_days": account_row.get("TENURE_IN_DAYS") if account_row else None,
+            "total_contract_amount": account_row.get("TOTAL_CONTRACT_AMOUNT") if account_row else None,
             "primary_churn_score_value": account_row.get("PRIMARY_CHURN_SCORE_VALUE") if account_row else None,
+            "usage_frequency": account_row.get("USAGE_FREQUENCY") if account_row else None,
             "next_renewal_date": (
                 account_row["NEXT_RENEWAL_DATE"].isoformat()
                 if account_row and account_row.get("NEXT_RENEWAL_DATE") else None
