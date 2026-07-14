@@ -16,7 +16,7 @@ from google.genai import types
 
 # Import the NPS agent we built
 # (If you wrapped this in SequentialAgent.py, change this to: from scripts.SequentialAgent import root_agent)
-from scripts.nps_data_collection_agent.agent import NpsAccountContextAgent
+from scripts.SequentialAgent import root_agent
 
 # ─────────────────────────────────────────────
 # App setup
@@ -35,11 +35,10 @@ api.add_middleware(
 
 session_service = InMemorySessionService()
 
-# Initialize the agent
-nps_agent = NpsAccountContextAgent(name="NpsAccountContextAgent")
+
 
 runner = Runner(
-    agent=nps_agent,
+    agent=root_agent,
     app_name="nps_pipeline",
     session_service=session_service,
 )
@@ -101,12 +100,15 @@ async def stream_events(event_gen, user_id, session_id):
         )
         
         nps_payload = session.state.get("nps_payload") if session else None
-        
-        # 3. Now we yield the final done event with our fully populated data
+        risk_results = session.state.get("risk_classification_results") if session else None
+        actions_taken = session.state.get("actions_taken") if session else None
+
         yield sse("done", {
-            "author":      last_author,
-            "text":        "",
-            "nps_payload": nps_payload 
+            "author": last_author,
+            "text": "",
+            "nps_payload": nps_payload,
+            "risk_classification_results": risk_results,
+            "actions_taken": actions_taken,
         })
 
     except Exception as e:
@@ -189,6 +191,8 @@ async def get_result(session_id: str, user_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     return {
-        "session_id":  session_id,
+        "session_id": session_id,
         "nps_payload": session.state.get("nps_payload"),
+        "risk_classification_results": session.state.get("risk_classification_results"),
+        "actions_taken": session.state.get("actions_taken"),
     }

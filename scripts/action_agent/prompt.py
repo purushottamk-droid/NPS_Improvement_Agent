@@ -12,7 +12,7 @@ import json
 
 def ACTION_PROMPT(ctx) -> str:
     classifications = ctx.state.get("risk_classification_results", {}).get("classifications", [])
-    account_context_list = ctx.state.get("account_context_list", [])
+    account_context_list = ctx.state.get("nps_payload", {}).get("account_contexts", [])
     rep_email = ctx.state.get("rep_email")
     manager_email = ctx.state.get("manager_email")
 
