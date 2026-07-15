@@ -36,46 +36,29 @@ def _build_mime_email(to: str, subject: str, body_html: str) -> str:
 # ---------------------------------------------------------------------
 
 async def notify_manager(
-    account_id: str,
-    account_name: str,
     manager_email: str,
-    risk_summary: str,
-    recommended_actions: str,
+    reps_detractor_summary: str,
     tool_context: ToolContext,
 ) -> dict:
-    """Send a risk/action briefing email to the manager for this account.
+    """Send ONE consolidated email to the manager covering ALL reps'
+    Detractor accounts across the whole batch.
 
-    risk_summary must contain ALL FOUR categories, pre-formatted by the
-    prompt layer, at OVERSIGHT/ROLLUP level (not per-deal tactical detail
-    — that level of detail belongs in message_rep instead):
-      1. Proactive Interventions — which accounts have interventions in
-         flight, and flag any that are stuck or overdue.
-      2. Renewal & Upsell Alerts — pipeline-level view of renewal risk /
-         upsell opportunity across the rep's book of accounts.
-      3. Service Improvement Insights — pattern-level signal (e.g. "N
-         accounts cite the same friction point"), not a single account's
-         raw complaint text.
-      4. Product Gap Analysis — aggregated signal worth escalating to
-         Product, not a one-off mention tied to a single account.
-
-    recommended_actions must be the manager-level action list derived
-    from the four categories above (e.g. coaching actions, escalations,
-    resourcing decisions) — distinct from the rep's own tactical actions.
+    reps_detractor_summary must be pre-formatted by the prompt layer as:
+      - One section per rep who has at least one Detractor account,
+        headed by that rep's name.
+      - Under each rep's name, one block per Detractor account with a
+        "Risk Summary" (4 numbered points) and "Recommended Actions"
+        (4 numbered points), matching the existing per-account format.
 
     manager_email MUST come from session state — never invented or guessed.
     """
-    subject = f"Account Risk Alert — {account_name} ({account_id})"
+    subject = "Detractor Account Risk Briefing — All Reps"
 
     body_html = f"""
     <html><body style="font-family: Arial, sans-serif; line-height: 1.6;">
-    <h2 style="color: #c0392b;">Account Risk Briefing: {account_name}</h2>
-    <p><b>Account ID:</b> {account_id}</p>
+    <h2 style="color: #c0392b;">Detractor Account Risk Briefing</h2>
 
-    <h3>Risk Summary</h3>
-    <p>{risk_summary.replace(chr(10), "<br>")}</p>
-
-    <h3>Recommended Actions</h3>
-    <p>{recommended_actions.replace(chr(10), "<br>")}</p>
+    {reps_detractor_summary.replace(chr(10), "<br>")}
 
     <hr>
     <p style="color: #7f8c8d; font-size: 12px;">
@@ -93,8 +76,6 @@ async def notify_manager(
         return {
             "status": "SENT",
             "type": "notify_manager",
-            "account_id": account_id,
-            "account_name": account_name,
             "manager_email": manager_email,
             "subject": subject,
             "message_id": sent.get("id"),
@@ -104,8 +85,7 @@ async def notify_manager(
         return {
             "status": "ERROR",
             "type": "notify_manager",
-            "account_id": account_id,
-            "account_name": account_name,
+            "manager_email": manager_email,
             "error_message": str(e),
         }
 
@@ -115,40 +95,38 @@ async def notify_manager(
 # ---------------------------------------------------------------------
 
 async def message_rep(
-    account_id: str,
-    account_name: str,
+    rep_id: str,
+    rep_name: str,
     rep_email: str,
-    action_summary: str,
+    accounts_summary: str,
     tool_context: ToolContext,
 ) -> dict:
-    """Send ONE consolidated action email to the rep/CSM/AE who owns
-    this account.
+    """Send ONE consolidated email to a rep covering ALL of their
+    High/Upsell accounts.
 
-    action_summary must contain ALL FOUR sections, pre-formatted by the
-    prompt layer, in this order:
+    accounts_summary must be pre-formatted by the prompt layer as one
+    block per account, each with the same four sections, in this order:
       1. Proactive Interventions
       2. Renewal & Upsell Alerts
-      3. Service Improvement Insights (reframed as customer-facing
-         talking points, not raw internal data)
-      4. Product Gap Analysis (reframed as objection-handling ammo for
-         the rep's next customer conversation)
+      3. Service Improvement Insights (customer-facing talking points)
+      4. Product Gap Analysis (objection-handling ammo)
 
-    rep_email MUST come from session state — never invented or guessed.
+    rep_email MUST come from account_context — never invented or guessed.
     """
-    subject = f"Action Needed — {account_name}"
+    subject = "Action Needed — Your Accounts This Week"
 
     body_html = f"""
     <html><body style="font-family: Arial, sans-serif; line-height: 1.6;">
-    <p>Hi,</p>
+    <p>Hi {rep_name},</p>
 
-    <p>Here's a consolidated action summary for <b>{account_name}</b>
-    that needs your attention this week:</p>
+    <p>Here's a consolidated action summary across your accounts that
+    need attention this week:</p>
 
     <div style="background: #f9f9f9; border-left: 4px solid #2980b9; padding: 12px 16px; margin: 16px 0;">
-      {action_summary.replace(chr(10), "<br>")}
+      {accounts_summary.replace(chr(10), "<br>")}
     </div>
 
-    <p>Please action these items this week to keep the account on track.</p>
+    <p>Please action these items this week to keep these accounts on track.</p>
 
     <p>Best,<br>Customer Success Ops</p>
 
@@ -167,8 +145,8 @@ async def message_rep(
         return {
             "status": "SENT",
             "type": "message_rep",
-            "account_id": account_id,
-            "account_name": account_name,
+            "rep_id": rep_id,
+            "rep_name": rep_name,
             "rep_email": rep_email,
             "subject": subject,
             "message_id": sent.get("id"),
@@ -178,8 +156,8 @@ async def message_rep(
         return {
             "status": "ERROR",
             "type": "message_rep",
-            "account_id": account_id,
-            "account_name": account_name,
+            "rep_id": rep_id,
+            "rep_name": rep_name,
             "error_message": str(e),
         }
 
