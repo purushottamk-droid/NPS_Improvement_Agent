@@ -16,6 +16,7 @@ SESSION STATE:
 from google.adk.agents import LlmAgent
 from .prompt import RISK_CLASSIFICATION_PROMPT
 from .output_schema import RiskClassificationBatch
+from google.genai import types
 
 
 risk_classification_agent = LlmAgent(
@@ -40,6 +41,10 @@ risk_classification_agent = LlmAgent(
     # Where LlmAgent writes the result in session state
     # Agent 4 reads ctx.session.state["risk_classification_results"]
     output_key="risk_classification_results",
+
+     generate_content_config=types.GenerateContentConfig(
+        temperature=0.1,
+    ),
 
     # Exclude conversation history from Gemini API call -- sends only
     # the current instruction + input, reducing token size and latency
