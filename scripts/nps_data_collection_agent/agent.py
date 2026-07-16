@@ -61,7 +61,7 @@ DATASET_ID     = "nps"
 TABLE_SURVEY_RESPONSE = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_response_data"
 TABLE_SURVEY          = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_data"
 TABLE_ACCOUNT         = f"{GCP_PROJECT_ID}.{DATASET_ID}.Churnzero_account_data_v2"
-TABLE_GONG            = f"{GCP_PROJECT_ID}.{DATASET_ID}.gong_call_data_nps"
+TABLE_GONG            = f"{GCP_PROJECT_ID}.{DATASET_ID}.gong_call_data_nps_v2"
 
 # Salesforce Opportunities come from the custom Salesforce MCP server
 # (salesforce_mcp_server/server.py), deployed as a Cloud Run endpoint,
@@ -259,6 +259,8 @@ def _fetch_gong_by_account_ids_sync(crm_account_ids: list[str]) -> dict[str, lis
             SALES_REP_ID,
             SALES_REP_NAME,
             SALES_REP_EMAIL,
+            SALES_MANAGER_NAME,
+            SALES_MANAGER_EMAIL,
         FROM `{TABLE_GONG}`
         WHERE ACCOUNT_ID IN UNNEST(@account_ids)
           AND STARTED >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
@@ -340,9 +342,20 @@ def build_gong_summary(calls: list[dict]) -> dict:
     else:
         recent_sentiment = "mixed"
 
+    latest_call = calls[0]  # calls are ORDER BY STARTED DESC
+
     return {
         "recent_calls_count": len(calls),
         "recent_sentiment": recent_sentiment,
+        "sales_rep": {
+            "id": latest_call.get("SALES_REP_ID"),
+            "name": latest_call.get("SALES_REP_NAME"),
+            "email": latest_call.get("SALES_REP_EMAIL"),
+        },
+        "sales_manager": {
+            "name": latest_call.get("SALES_MANAGER_NAME"),
+            "email": latest_call.get("SALES_MANAGER_EMAIL"),
+        },
         "recent_calls": calls  # This injects all the new Gong fields directly
     }
 
