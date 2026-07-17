@@ -44,7 +44,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
 from google.adk.agents import BaseAgent
-from google.adk.events import Event
+from google.adk.events import Event, EventActions
 from google.adk.runners import InMemoryRunner
 from google.auth.transport import requests as google_auth_requests
 from google.cloud import bigquery
@@ -529,9 +529,15 @@ class NpsAccountContextAgent(BaseAgent):
         print(f"[NpsAccountContextAgent] Fetched {len(survey_rows)} survey response row(s)")
 
         if not survey_rows:
-            ctx.session.state["nps_account_contexts"] = []
-            ctx.session.state["nps_summary"] = build_nps_summary([])
-            yield Event(author=self.name, content=None)
+            empty_payload = {
+                "summary": build_nps_summary([]),
+                "account_contexts": []
+            }
+            yield Event(
+                author=self.name,
+                content=None,
+                actions=EventActions(state_delta={"nps_payload": empty_payload}),
+            )
             return
 
         # Step 2: resolve churnzero_account_data for every distinct
@@ -583,22 +589,27 @@ class NpsAccountContextAgent(BaseAgent):
         all_scores = [r["survey_score"] for r in survey_rows if r.get("survey_score") is not None]
         nps_summary = build_nps_summary(all_scores)
 
-        # Step 7: save to session state
-        ctx.session.state["nps_payload"] = {
+        # Step 7: build payload and commit via state_delta — the ADK
+        # mechanism that actually persists state across sub-agents in a
+        # SequentialAgent. Direct ctx.session.state[...] = ... mutation
+        # is not reliably committed to the session snapshot that
+        # downstream agents / api.py read.
+        nps_payload = {
             "summary": nps_summary,
             "account_contexts": nps_account_contexts
         }
 
-        payload = ctx.session.state.get("nps_payload", {})
-    
         print("\n── Final session state: nps_payload (Summary) ──")
-        print(json.dumps(payload.get("summary"), indent=2, default=str))
-        
-        contexts = payload.get("account_contexts", [])
-        print(f"\n── nps_payload (Account Contexts: {len(contexts)} entries) ──")
-        print(json.dumps(contexts, indent=2, default=str))
+        print(json.dumps(nps_summary, indent=2, default=str))
 
-        yield Event(author=self.name, content=None)
+        print(f"\n── nps_payload (Account Contexts: {len(nps_account_contexts)} entries) ──")
+        print(json.dumps(nps_account_contexts, indent=2, default=str))
+
+        yield Event(
+            author=self.name,
+            content=None,
+            actions=EventActions(state_delta={"nps_payload": nps_payload}),
+        )
 
 
 nps_data_collection_agent = NpsAccountContextAgent(name="nps_data_collection_agent")

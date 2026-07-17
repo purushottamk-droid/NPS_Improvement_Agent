@@ -34,7 +34,8 @@ def RISK_CLASSIFICATION_PROMPT(ctx) -> str:
       }
     """
     
-    account_context_list = ctx.state.get("nps_payload", {}).get("account_contexts", [])
+    nps_payload = ctx.state.get("nps_payload") or {}
+    account_context_list = nps_payload.get("account_contexts", [])
     return f"""
 You are a senior Customer Success strategist with deep experience turning
 at-risk B2B accounts around and identifying expansion opportunities.

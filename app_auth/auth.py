@@ -13,7 +13,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-OAUTH_FILE = os.path.join(os.path.dirname(__file__), "oauth_final.json")
+OAUTH_FILE = os.environ.get("OAUTH_FILE_PATH", os.path.join(os.path.dirname(__file__), "oauth_final.json"))
 
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
@@ -34,8 +34,14 @@ def _load_oauth_data() -> dict:
 
 
 def _save_oauth_data(data: dict) -> None:
-    with open(OAUTH_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(OAUTH_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except OSError:
+        # OAUTH_FILE may be a read-only Secret Manager mount (e.g. on
+        # Cloud Run) — refreshed token still works in-memory for this
+        # request, it just won't persist across container restarts.
+        pass
 
 
 def _get_credentials(scopes: list[str]) -> Credentials:

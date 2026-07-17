@@ -40,12 +40,30 @@ def ACTION_PROMPT(ctx) -> str:
     manager_email = HARDCODED_MANAGER_EMAIL
     
 
-    # Index classifications by account_id for easy per-account lookup
+   # Index classifications by account_id for easy per-account lookup
     classification_by_account = {c.get("account_id"): c for c in classifications}
 
-    # Group accounts by rep_id — one rep may own multiple accounts
-    accounts_by_rep = {}
+    # Merge each account's classification fields directly onto its
+    # context object BEFORE grouping — so the model never has to
+    # cross-reference two separate structures by account_id itself.
+    merged_accounts = []
     for account in account_context_list:
+        account_id = account.get("account_id")
+        classification = classification_by_account.get(account_id, {})
+        merged_account = {
+            **account,
+            "risk_level": classification.get("risk_level"),
+            "nps_label": classification.get("nps_label"),
+            "drivers": classification.get("drivers", []),
+            "renewal": classification.get("renewal", {"is_renewal_soon": False}),
+            "upsell_candidate": classification.get("upsell_candidate", False),
+            "recommended_action": classification.get("recommended_action"),
+        }
+        merged_accounts.append(merged_account)
+
+    # Group merged accounts by rep_id — one rep may own multiple accounts
+    accounts_by_rep = {}
+    for account in merged_accounts:
         rep_id = account.get("rep_id")
         accounts_by_rep.setdefault(rep_id, []).append(account)
 
@@ -57,23 +75,25 @@ manager, then call the right tools. No free-form judgment.
 REP_EMAIL (fixed value — use exactly, never invent): {rep_email}
 MANAGER_EMAIL (fixed value — use exactly, never invent): {manager_email}
 
-ACCOUNTS_GROUPED_BY_REP:
+ACCOUNTS_GROUPED_BY_REP (each account already includes its risk_level,
+nps_label, drivers, renewal, upsell_candidate, and recommended_action —
+no cross-referencing needed):
 {json.dumps(accounts_by_rep, indent=2, default=str)}
 
-RISK_CLASSIFICATIONS_BY_ACCOUNT_ID:
+RISK_CLASSIFICATIONS_BY_ACCOUNT_ID (for Rule 2's cross-account Detractor
+pattern scan only):
 {json.dumps(classification_by_account, indent=2, default=str)}
 
 ═══════════════════════════════════════════════════════
 ## DATA FIELDS YOU WILL USE
 ═══════════════════════════════════════════════════════
-Per account (from ACCOUNTS_GROUPED_BY_REP):
+Per account (all fields already merged onto each entry in
+ACCOUNTS_GROUPED_BY_REP — no lookup required):
 - account_id, account_name, rep_id, rep_name
 - survey.score, survey.label, survey.comment
 - churn.is_churn_account, churn.next_renewal_date, churn.tenure_in_days
 - cases.open_cases[], cases.has_open_high_priority, cases.latest_case_reason
 - gong.recent_sentiment
-
-Per account (from RISK_CLASSIFICATIONS_BY_ACCOUNT_ID, joined via account_id):
 - risk_level, nps_label, drivers[], renewal.is_renewal_soon,
   upsell_candidate, recommended_action
 

@@ -20,7 +20,7 @@ from email.mime.text import MIMEText
 
 from google.adk.tools import FunctionTool, ToolContext
 
-from auth.auth import build_gmail_service
+from app_auth.auth import build_gmail_service
 
 
 def _build_mime_email(to: str, subject: str, body_html: str) -> str:
