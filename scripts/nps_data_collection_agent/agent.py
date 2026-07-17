@@ -187,7 +187,7 @@ def _fetch_survey_responses_sync() -> list[dict]:
             ON r.SURVEY_ID = s.ID
         WHERE r._FIVETRAN_DELETED IS NOT TRUE
         ORDER BY r.DATE DESC
-        LIMIT 30
+        LIMIT 5
     """
     rows = [dict(row) for row in client.query(query).result()]
     return rows

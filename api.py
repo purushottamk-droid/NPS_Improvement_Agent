@@ -26,7 +26,11 @@ api = FastAPI(title="NPS Improvement Agent — SSE API")
 
 api.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Update this with your frontend URLs in production
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://sales-conversion-agent-final.web.app",
+    ],# Update this with your frontend URLs in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
