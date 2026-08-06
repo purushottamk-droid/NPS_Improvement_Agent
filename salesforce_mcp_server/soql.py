@@ -74,53 +74,6 @@ FIELD_MAP = {
     "bdr":                           "BDR_Name__c",
 }
 
-CASE_FIELD_MAP = {
-    "case_id":                    "Case_ID__c",
-    "case_number":                "Case_Number__c",
-    "account_id":                 "Account_ID__c",
-    "account_name":               "Account_Name__c",
-    "opportunity_id":              "Opportunity_ID__c",
-    "opportunity_name":            "Opportunity_Name__c",
-    "case_type":                   "Case_Type__c",
-    "product_area":                "Product_Area__c",
-    "subject":                     "Subject__c",
-    "description":                 "Description__c",
-    "priority":                    "Priority__c",
-    "severity":                    "Severity__c",
-    "status":                      "Status__c",
-    "reason":                      "Reason__c",
-    "created_date":                "Created_Date__c",
-    "first_response_date":         "First_Response_Date__c",
-    "last_interaction_date":       "Last_Interaction_Date__c",
-    "closed_date":                 "Closed_Date__c",
-    "is_closed":                   "Is_Closed__c",
-    "is_escalated":                "Is_Escalated__c",
-    "escalation_level":            "Escalation_Level__c",
-    "root_cause":                  "Root_Cause__c",
-    "resolution_summary":          "Resolution_Summary__c",
-    "customer_sentiment":          "Customer_Sentiment__c",
-    "customer_health":             "Customer_Health__c",
-    "nps_risk_level":              "NPS_Risk_Level__c",
-    "nps_risk_reason":             "NPS_Risk_Reason__c",
-    "recommended_agent_action":    "Recommended_Agent_Action__c",
-    "customer_success_manager":    "Customer_Success_Manager__c",
-    "case_owner":                  "Case_Owner__c",
-    "sales_rep_name":              "Sales_Rep_Name__c",
-    "sla_status":                 "SLA_Status__c",
-    "comment_count":              "Comment_Count__c",
-    "latest_customer_comment":    "Latest_Customer_Comment__c",
-    "latest_internal_note":       "Latest_Internal_Note__c",
-    "resolution_category":        "Resolution_Category__c",
-}
-
-def build_cases_by_account_soql(account_id: str) -> str:
-    fields = ", ".join(sorted(set(CASE_FIELD_MAP.values())))
-    safe_account_id = _escape_soql_string(account_id)
-    return f"SELECT {fields} FROM CASE__c WHERE Account_ID__c = '{safe_account_id}'"
-
-
-def parse_case_record(record: dict) -> dict:
-    return {clean_name: _extract(record, api_field) for clean_name, api_field in CASE_FIELD_MAP.items()}
 # Only needed for the WHERE clause itself, not part of the returned shape.
 # OwnerId is NOT usable for per-rep scoping — every Opportunity in this
 # org shares one OwnerId (a shared/integration user) — so the rep-scoped
@@ -132,7 +85,7 @@ _REP_NAME_FIELD = "Sales_Rep_Name__c"
 # (confirmed directly: a real query against this org 400'd until these
 # were excluded), so these must never appear in a SELECT clause. Downstream
 # code still gets these keys via parse_opportunity_record, just always None.
-KNOWN_MISSING_FIELDS = set()
+KNOWN_MISSING_FIELDS = {"account_segment", "discount_pct", "days_open"}
 
 
 def _queryable_fields() -> set[str]:
@@ -169,6 +122,16 @@ def build_opportunities_by_account_soql(account_id: str) -> str:
     safe_account_id = _escape_soql_string(account_id)
     return f"SELECT {fields} FROM Opportunity WHERE AccountId = '{safe_account_id}'"
 
+def build_opportunities_soql(lookback_days: int) -> str:
+    """
+    All opportunities created within the trailing `lookback_days` —
+    unscoped by rep/account, for bulk pulls like the marketing funnel
+    (as opposed to build_opportunities_by_rep_name_soql /
+    build_opportunities_by_account_soql, which need one already).
+    """
+    fields = ", ".join(sorted(_queryable_fields()))
+    created_date_field = FIELD_MAP["created_date"]
+    return f"SELECT {fields} FROM Opportunity WHERE {created_date_field} = LAST_N_DAYS:{int(lookback_days)}"
 
 def build_stage_benchmark_soql() -> str:
     stage_field = FIELD_MAP["current_stage"]
@@ -249,3 +212,140 @@ def _extract(record: dict, field_path: str):
 def parse_opportunity_record(record: dict) -> dict:
     """Map one raw Salesforce query record into our clean field names."""
     return {clean_name: _extract(record, api_field) for clean_name, api_field in FIELD_MAP.items()}
+
+# ─────────────────────────────────────────────
+# CASES  (custom object CASE__c — NOT the standard Salesforce Case object)
+# ─────────────────────────────────────────────
+#
+# NOTE: unlike FIELD_MAP (Opportunity), these have NOT been verified against
+# the org's real schema yet — no verify_field_map.py-equivalent run against
+# CASE__c. Values below are best-guess __c field names following this org's
+# existing naming convention. Confirm each via a describe call before relying
+# on this in production; Salesforce rejects the ENTIRE query if the SELECT
+# list references a field that doesn't exist (same failure mode as Opportunity
+# — see KNOWN_MISSING_FIELDS above).
+CASE_OBJECT = "CASE__c"  # placeholder — confirm real API object name later
+
+CASE_FIELD_MAP = {
+    "case_id":                    "Case_ID__c",
+    "case_number":                "Case_Number__c",
+    "account_id":                 "Account_ID__c",
+    "account_name":               "Account_Name__c",
+    "opportunity_id":              "Opportunity_ID__c",
+    "opportunity_name":            "Opportunity_Name__c",
+    "case_type":                   "Case_Type__c",
+    "product_area":                "Product_Area__c",
+    "subject":                     "Subject__c",
+    "description":                 "Description__c",
+    "priority":                    "Priority__c",
+    "severity":                    "Severity__c",
+    "status":                      "Status__c",
+    "reason":                      "Reason__c",
+    "created_date":                "Created_Date__c",
+    "first_response_date":         "First_Response_Date__c",
+    "last_interaction_date":       "Last_Interaction_Date__c",
+    "closed_date":                 "Closed_Date__c",
+    "is_closed":                   "Is_Closed__c",
+    "is_escalated":                "Is_Escalated__c",
+    "escalation_level":            "Escalation_Level__c",
+    "root_cause":                  "Root_Cause__c",
+    "resolution_summary":          "Resolution_Summary__c",
+    "customer_sentiment":          "Customer_Sentiment__c",
+    "customer_health":             "Customer_Health__c",
+    "nps_risk_level":              "NPS_Risk_Level__c",
+    "nps_risk_reason":             "NPS_Risk_Reason__c",
+    "recommended_agent_action":    "Recommended_Agent_Action__c",
+    "customer_success_manager":    "Customer_Success_Manager__c",
+    "case_owner":                  "Case_Owner__c",
+    "sales_rep_name":              "Sales_Rep_Name__c",
+}
+
+
+def _queryable_case_fields() -> set[str]:
+    return set(CASE_FIELD_MAP.values())
+
+
+def build_cases_by_account_soql(account_id: str) -> str:
+    """
+    Every Case on this Salesforce account, regardless of status — the
+    agent's build_case_summary() filters open vs closed client-side.
+    ORDER BY is required: agent.py's build_case_summary() reads cases[0]
+    as the latest case, assuming DESC-by-created-date ordering.
+    """
+    fields = ", ".join(sorted(_queryable_case_fields()))
+    safe_account_id = _escape_soql_string(account_id)
+    return (
+        f"SELECT {fields} FROM {CASE_OBJECT} "
+        f"WHERE {CASE_FIELD_MAP['account_id']} = '{safe_account_id}' "
+        f"ORDER BY {CASE_FIELD_MAP['created_date']} DESC"
+    )
+
+
+def parse_case_record(record: dict) -> dict:
+    """Map one raw Salesforce query record into our clean field names."""
+    return {clean_name: _extract(record, api_field) for clean_name, api_field in CASE_FIELD_MAP.items()}
+
+# ─────────────────────────────────────────────
+# LEADS
+# ─────────────────────────────────────────────
+LEAD_OBJECT = "Lead"  # placeholder — confirm real object name later
+
+LEAD_FIELD_MAP = {
+    "address":                      "Address",
+    "annual_revenue":               "AnnualRevenue",
+    "clean_status":                 "CleanStatus",
+    "company":                      "Company",
+    "company_duns_number":          "CompanyDunsNumber",
+    "converted_opportunity_id":     "converted_opportunity_id__c",
+    "created_by_id":                "CreatedById",
+    "created_date":                 "created_date__c",
+    "current_generators":           "CurrentGenerators__c",
+    "dandb_company_id":             "DandbCompanyId",
+    "jigsaw":                       "Jigsaw",
+    "description":                  "Description",
+    "do_not_call":                  "DoNotCall",
+    "email":                        "Email",
+    "has_opted_out_of_email":       "HasOptedOutOfEmail",
+    "fax":                          "Fax",
+    "has_opted_out_of_fax":         "HasOptedOutOfFax",
+    "gender_identity":              "GenderIdentity",
+    "individual_id":                "IndividualId",
+    "industry":                     "Industry",
+    "last_modified_by_id":          "LastModifiedById",
+    "last_transfer_date":           "LastTransferDate",
+    "owner_id":                     "OwnerId",
+    "lead_source":                  "LeadSource",
+    "status":                       "Status",
+    "mobile_phone":                 "MobilePhone",
+    "name":                         "Name",
+    "salutation":                   "Salutation",
+    "first_name":                   "FirstName",
+    "last_name":                    "LastName",
+    "number_of_employees":          "NumberOfEmployees",
+    "number_of_locations":          "NumberofLocations__c",
+    "phone":                        "Phone",
+    "primary":                      "Primary__c",
+    "product_interest":             "ProductInterest__c",
+    "pronouns":                     "Pronouns",
+    "rating":                       "Rating",
+    "sic_code":                     "SICCode__c",
+    "title":                        "Title",
+    "website":                      "Website",
+}
+
+
+def _queryable_lead_fields() -> set[str]:
+    return set(LEAD_FIELD_MAP.values())
+
+
+def build_leads_soql(lookback_days: int) -> str:
+    fields = ", ".join(sorted(_queryable_lead_fields()))
+    created_date_field = LEAD_FIELD_MAP["created_date"]
+    return (
+        f"SELECT {fields} FROM {LEAD_OBJECT} "
+        f"WHERE {created_date_field} = LAST_N_DAYS:{int(lookback_days)}"
+    )
+
+
+def parse_lead_record(record: dict) -> dict:
+    return {clean_name: _extract(record, api_field) for clean_name, api_field in LEAD_FIELD_MAP.items()}

@@ -29,14 +29,9 @@ from .salesforce_auth import get_salesforce_session
 from .soql import (
     build_attainment_current_month_soql,
     build_attainment_trailing_3_months_soql,
-    build_cases_by_account_soql,
-    build_leads_soql,
     build_opportunities_by_account_soql,
-    build_opportunities_soql,
     build_opportunities_by_rep_name_soql,
     build_stage_benchmark_soql,
-    parse_case_record,
-    parse_lead_record,
     parse_opportunity_record,
 )
 
@@ -104,25 +99,6 @@ async def get_opportunities_by_account(account_id: str) -> dict:
     records = await _run_soql(build_opportunities_by_account_soql(account_id))
     return {"opportunities": [parse_opportunity_record(r) for r in records]}
 
-@mcp.tool()
-async def get_cases_by_account(account_id: str) -> dict:
-    """Return every Case (custom object CASE__c) on this Salesforce account
-    ID, regardless of status — used for NPS account-context aggregation
-    (nps_account_context_agent.py's _fetch_cases_mcp). Returns
-    {"cases": [...]} in this pipeline's clean field-name shape (see
-    soql.CASE_FIELD_MAP) — wrapped in a dict for the same reason as the
-    opportunity tools (see get_opportunities_by_rep_name)."""
-    records = await _run_soql(build_cases_by_account_soql(account_id))
-    return {"cases": [parse_case_record(r) for r in records]}
-
-@mcp.tool()
-async def get_opportunities(lookback_days: int = 90) -> dict:
-    """Return every Opportunity created within the trailing `lookback_days`,
-    unscoped by rep/account — used for bulk pulls like the marketing
-    funnel. Returns {"opportunities": [...]} — see
-    get_opportunities_by_rep_name for why this is a dict, not a bare list."""
-    records = await _run_soql(build_opportunities_soql(lookback_days))
-    return {"opportunities": [parse_opportunity_record(r) for r in records]}
 
 @mcp.tool()
 async def get_stage_duration_benchmark() -> dict:
@@ -162,13 +138,6 @@ async def get_closed_won_attainment(rep_name: str) -> dict:
         "closed_won_arr_trailing_3_months": trailing_3_months_arr or 0,
     }
 
-@mcp.tool()
-async def get_leads(lookback_days: int = 90) -> dict:
-    """Return every Lead created within the trailing `lookback_days`, as
-    {"leads": [...]}. Wrapped in a dict for the same reason as the
-    opportunity tools (see get_opportunities_by_rep_name)."""
-    records = await _run_soql(build_leads_soql(lookback_days))
-    return {"leads": [parse_lead_record(r) for r in records]}
 
 @mcp.tool()
 async def create_task(account_id: str, owner_id: str, subject: str, description: str) -> dict:

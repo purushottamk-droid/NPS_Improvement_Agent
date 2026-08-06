@@ -1,5 +1,7 @@
 # ── MCP server framework ────────────────────────────
-mcp
+mcp>=1.6.0,<2.0.0
+uvicorn
+starlette
 
 # ── HTTP calls to Salesforce's REST/SOQL API ────────
 httpx
