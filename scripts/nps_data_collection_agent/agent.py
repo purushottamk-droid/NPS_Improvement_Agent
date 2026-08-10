@@ -119,7 +119,7 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict:
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
-            if result.isError:
+            if result.is_error:
                 raise RuntimeError(f"MCP tool '{tool_name}' returned an error: {result.content}")
             return json.loads(result.content[0].text)
 
