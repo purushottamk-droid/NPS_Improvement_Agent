@@ -31,6 +31,10 @@ class RiskClassification(BaseModel):
         description="Salesforce Account ID — copy verbatim from account_context.account_id"
     )
 
+    account_name: str = Field(
+    description="Account name — copy verbatim from account_context.account_name"
+    )
+
     risk_level: Literal["High", "Upsell", "Low"] = Field(
         description=(
             "Follow the EXACT rule set in Section 4 of the prompt. Do not "

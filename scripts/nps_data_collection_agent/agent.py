@@ -62,7 +62,7 @@ TABLE_SURVEY_RESPONSE = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_respons
 TABLE_SURVEY          = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_data"
 TABLE_ACCOUNT         = f"{GCP_PROJECT_ID}.{DATASET_ID}.Churnzero_account_data_v2"
 TABLE_GONG            = f"{GCP_PROJECT_ID}.{DATASET_ID}.gong_call_data_nps_v2"
-
+TABLE_OPPORTUNITY = f"{GCP_PROJECT_ID}.{DATASET_ID}.opportunity_data"
 # Salesforce Opportunities come from the custom Salesforce MCP server
 # (salesforce_mcp_server/server.py), deployed as a Cloud Run endpoint,
 # reached over SSE — NOT from BigQuery's opportunity_data table, per
@@ -187,7 +187,7 @@ def _fetch_survey_responses_sync() -> list[dict]:
             ON r.SURVEY_ID = s.ID
         WHERE r._FIVETRAN_DELETED IS NOT TRUE
         ORDER BY r.DATE DESC
-        LIMIT 5
+        LIMIT 10
     """
     rows = [dict(row) for row in client.query(query).result()]
     return rows
@@ -279,6 +279,53 @@ def _fetch_gong_by_account_ids_sync(crm_account_ids: list[str]) -> dict[str, lis
         calls_by_account.setdefault(row["ACCOUNT_ID"], []).append(row)
     return calls_by_account
 
+def _fetch_rep_manager_fallback_sync(account_names: list[str]) -> dict[str, dict]:
+    """Fallback rep NAME source when Gong has zero calls for an account."""
+    if not account_names:
+        return {}
+    client = bigquery.Client(project=GCP_PROJECT_ID)
+    query = f"""
+        SELECT
+            `Account Name`   AS account_name,
+            `Sales Rep Name` AS sales_rep_name
+        FROM `{TABLE_OPPORTUNITY}`
+        WHERE `Account Name` IN UNNEST(@account_names)
+        ORDER BY `Opportunity Created Date` DESC
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("account_names", "STRING", account_names)]
+    )
+    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
+    result = {}
+    for row in rows:
+        name = row["account_name"]
+        if name not in result:
+            result[name] = row
+    return result
+
+
+def _fetch_rep_directory_by_name_sync(rep_names: list[str]) -> dict[str, dict]:
+    """Rep directory built from ALL Gong calls, keyed by rep NAME —
+    finds a rep's email even when THIS account has zero calls."""
+    if not rep_names:
+        return {}
+    client = bigquery.Client(project=GCP_PROJECT_ID)
+    query = f"""
+        SELECT DISTINCT
+            SALES_REP_ID,
+            SALES_REP_NAME,
+            SALES_REP_EMAIL,
+            SALES_MANAGER_NAME,
+            SALES_MANAGER_EMAIL
+        FROM `{TABLE_GONG}`
+        WHERE SALES_REP_NAME IN UNNEST(@rep_names)
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("rep_names", "STRING", rep_names)]
+    )
+    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
+    return {row["SALES_REP_NAME"]: row for row in rows if row.get("SALES_REP_NAME")}
+
 
 # ─────────────────────────────────────────────
 # ASYNC WRAPPER
@@ -332,7 +379,12 @@ def build_nps_summary(all_scores: list[int]) -> dict:
 
 def build_gong_summary(calls: list[dict]) -> dict:
     if not calls:
-        return {"recent_calls_count": 0, "recent_sentiment": None}
+        return {
+            "recent_calls_count": 0,
+            "recent_sentiment": None,
+            "sales_rep": {"id": None, "name": None, "email": None},
+            "sales_manager": {"name": None, "email": None},
+        }
 
     sentiments = [c["CUSTOMER_SENTIMENT"] for c in calls if c.get("CUSTOMER_SENTIMENT")]
     if not sentiments:
@@ -459,13 +511,37 @@ def build_account_context(
     opportunities: list[dict],
     cases: list[dict],
     gong_calls: list[dict],
+    rep_manager_fallback: dict,
+    rep_directory: dict,
 ) -> dict:
     score = survey_row.get("survey_score")
     survey_type = "ongoing" if survey_row.get("survey_is_active") else "one-time"
 
+    gong_summary = build_gong_summary(gong_calls)
+    rep_id = gong_summary["sales_rep"]["id"]
+    rep_name = gong_summary["sales_rep"]["name"]
+    rep_email = gong_summary["sales_rep"]["email"]
+    manager_name = gong_summary["sales_manager"]["name"]
+    manager_email = gong_summary["sales_manager"]["email"]
+
+    if not rep_name and account_row:
+        fallback = rep_manager_fallback.get(account_row.get("NAME"), {})
+        rep_name = fallback.get("sales_rep_name")
+        if rep_name:
+            directory_entry = rep_directory.get(rep_name, {})
+            rep_id = directory_entry.get("SALES_REP_ID")
+            rep_email = directory_entry.get("SALES_REP_EMAIL")
+            manager_name = directory_entry.get("SALES_MANAGER_NAME")
+            manager_email = directory_entry.get("SALES_MANAGER_EMAIL")
+
     return {
         "account_id": account_row.get("CRM_ID") if account_row else None,
         "account_name": account_row.get("NAME") if account_row else None,
+        "rep_id": rep_id,
+        "rep_name": rep_name,
+        "rep_email": rep_email,
+        "manager_name": manager_name,
+        "manager_email": manager_email,
         "survey": {
             "response_id": survey_row.get("response_id"),
             "survey_id": survey_row.get("survey_id"),
@@ -497,8 +573,9 @@ def build_account_context(
         },
         "opportunities": build_opportunity_summary(opportunities),
         "cases": build_case_summary(cases),
-        "gong": build_gong_summary(gong_calls),
+        "gong": gong_summary,
     }
+    
 
 
 # ─────────────────────────────────────────────
@@ -527,6 +604,15 @@ class NpsAccountContextAgent(BaseAgent):
         # Step 1: pull the whole survey response batch (BigQuery, sync -> _run)
         survey_rows = await _run(_fetch_survey_responses_sync)
         print(f"[NpsAccountContextAgent] Fetched {len(survey_rows)} survey response row(s)")
+        seen_accounts = set()
+        deduped_rows = []
+        for row in survey_rows:
+            acct_id = row.get("churnzero_account_id")
+            if acct_id not in seen_accounts:
+                seen_accounts.add(acct_id)
+                deduped_rows.append(row)
+        survey_rows = deduped_rows
+        print(f"[NpsAccountContextAgent] Deduped to {len(survey_rows)} unique account(s)")
 
         if not survey_rows:
             empty_payload = {
@@ -559,6 +645,15 @@ class NpsAccountContextAgent(BaseAgent):
 
         gong_by_account = await _run(_fetch_gong_by_account_ids_sync, distinct_crm_ids)
 
+        # Step 3b: fallback rep/manager sources for accounts with zero Gong calls
+        account_names = [a.get("NAME") for a in accounts_by_id.values() if a.get("NAME")]
+        rep_manager_fallback = await _run(_fetch_rep_manager_fallback_sync, account_names)
+
+        rep_names_needing_email = list({
+            v.get("sales_rep_name") for v in rep_manager_fallback.values() if v.get("sales_rep_name")
+        })
+        rep_directory = await _run(_fetch_rep_directory_by_name_sync, rep_names_needing_email)
+
         # Step 4: fetch Opportunities per distinct account via Salesforce
         # MCP, in parallel across accounts (native async, no _run wrapping).
         opp_results, case_results = await asyncio.gather(
@@ -582,6 +677,8 @@ class NpsAccountContextAgent(BaseAgent):
                 opportunities=opportunities_by_account.get(crm_id, []),
                 cases=cases_by_account.get(crm_id, []),
                 gong_calls=gong_by_account.get(crm_id, []),
+                rep_manager_fallback=rep_manager_fallback,
+                rep_directory=rep_directory,
             )
             nps_account_contexts.append(context)
 

@@ -22,15 +22,12 @@ Do not add judgment calls or invent new rules.
 """
 
 import json
-HARDCODED_REP_EMAIL = "kakadetalent@gmail.com"
-HARDCODED_MANAGER_EMAIL = "kakade007k@gmail.com"
+HARDCODED_REP_EMAIL = "sayali.mahulkar@atgeirsolutions.com"
+HARDCODED_MANAGER_EMAIL = "sayali.mahulkar@atgeirsolutions.com"
 
 
-# Hardcoded test recipients — bypasses session state for rep_email /
-# manager_email. Replace with real values or revert to ctx.state.get(...)
-# once Agent 1+2 is wired to supply these per-account.
-HARDCODED_REP_EMAIL = "kakadetalent@gmail.com"
-HARDCODED_MANAGER_EMAIL = "kakade007k@gmail.com"
+
+
 
 
 def ACTION_PROMPT(ctx) -> str:
@@ -61,11 +58,23 @@ def ACTION_PROMPT(ctx) -> str:
         }
         merged_accounts.append(merged_account)
 
-    # Group merged accounts by rep_id — one rep may own multiple accounts
+    LABEL_PRIORITY = {"Detractor": 0, "Passive": 1, "Promoter": 2}
+    merged_accounts.sort(key=lambda a: LABEL_PRIORITY.get(a.get("nps_label"), 3))
+
     accounts_by_rep = {}
     for account in merged_accounts:
-        rep_id = account.get("rep_id")
+        rep_id = account.get("rep_email")
         accounts_by_rep.setdefault(rep_id, []).append(account)
+
+    # TESTING LIMIT — cap to first 2 reps only, to avoid token exhaustion
+    # when account count scales up (e.g. 5 -> 30 accounts). Remove this
+    # slice once ready to process the full rep list in production.
+    all_detractor_accounts = [
+        a for a in merged_accounts if a.get("nps_label") == "Detractor"
+    ]
+    
+    MAX_REPS_FOR_TESTING = 2
+    accounts_by_rep = dict(list(accounts_by_rep.items())[:MAX_REPS_FOR_TESTING])
 
     return f"""
 You are the Action Agent in an NPS improvement pipeline. Your job: build
@@ -84,6 +93,10 @@ RISK_CLASSIFICATIONS_BY_ACCOUNT_ID (for Rule 2's cross-account Detractor
 pattern scan only):
 {json.dumps(classification_by_account, indent=2, default=str)}
 
+ALL_DETRACTOR_ACCOUNTS (full list, across ALL reps, NOT limited by the
+testing slice above — Rule 2 MUST use this list, not ACCOUNTS_GROUPED_BY_REP):
+{json.dumps(all_detractor_accounts, indent=2, default=str)}
+
 ═══════════════════════════════════════════════════════
 ## DATA FIELDS YOU WILL USE
 ═══════════════════════════════════════════════════════
@@ -100,6 +113,10 @@ ACCOUNTS_GROUPED_BY_REP — no lookup required):
 ═══════════════════════════════════════════════════════
 ## RULE 1 — Rep notification (ONE email per rep, ALL their accounts)
 ═══════════════════════════════════════════════════════
+NOTE: ACCOUNTS_GROUPED_BY_REP has already been limited to a maximum
+number of reps for testing purposes — only process the reps present in
+that data, do not look for or expect any others.
+
 For EVERY rep in ACCOUNTS_GROUPED_BY_REP, call message_rep ONCE, covering
 ALL of that rep's accounts — regardless of risk_level or nps_label
 (Promoter, Passive, and Detractor accounts are ALL included).
@@ -143,7 +160,10 @@ rep_id with reason "rep_email missing", do not call the tool for any rep.
 ═══════════════════════════════════════════════════════
 ## RULE 2 — Manager notification (ONE email total, Detractors only)
 ═══════════════════════════════════════════════════════
-Collect every account across ALL reps where nps_label == "Detractor".
+Use ALL_DETRACTOR_ACCOUNTS above — this is the complete Detractor list
+across every rep, unaffected by any testing limit applied to Rule 1.
+Do NOT use ACCOUNTS_GROUPED_BY_REP for this rule, since it may be
+limited to a subset of reps for testing.
 
 If this set is EMPTY: record ONE SKIPPED entry with reason "no Detractor
 accounts in this run", do not call notify_manager.
@@ -200,8 +220,8 @@ Never batch multiple tool calls in one turn.
 - If a tool returns status "ERROR", reflect that accurately — do not
   silently retry.
 - Never invent rep_id, rep_name, rep_email, or manager_email.
-- Use ONLY the data in ACCOUNTS_GROUPED_BY_REP and
-  RISK_CLASSIFICATIONS_BY_ACCOUNT_ID — do not fabricate findings.
+- Use ONLY the data in ACCOUNTS_GROUPED_BY_REP, RISK_CLASSIFICATIONS_BY_ACCOUNT_ID,
+  and ALL_DETRACTOR_ACCOUNTS — do not fabricate findings.
 - Do NOT mention, plan, or execute ServiceNow requests or executive
   outreach anywhere — out of scope for this agent.
 

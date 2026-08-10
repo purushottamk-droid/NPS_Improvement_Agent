@@ -2,13 +2,14 @@
 prompt.py — Agent 3: Risk & Scenario Classification Agent
 """
 import json
+from datetime import date
 
 # Doc explicitly gives 90 days as the Upsell renewal window ("e.g., 90 days")
-UPSELL_RENEWAL_THRESHOLD_DAYS = 90
+UPSELL_RENEWAL_THRESHOLD_DAYS = 400
 
 # Doc does NOT give a number for the High-risk "renewal due soon" rule.
 # Using a tighter window than Upsell's -- confirm with manager.
-HIGH_RISK_RENEWAL_THRESHOLD_DAYS = 60
+HIGH_RISK_RENEWAL_THRESHOLD_DAYS = 90
 
 # Doc: "type is new sell and closed within current timestamp - closed
 # date is 6-9 months then cross sell and upsell"
@@ -36,6 +37,7 @@ def RISK_CLASSIFICATION_PROMPT(ctx) -> str:
     
     nps_payload = ctx.state.get("nps_payload") or {}
     account_context_list = nps_payload.get("account_contexts", [])
+    today_str = date.today().isoformat()
     return f"""
 You are a senior Customer Success strategist with deep experience turning
 at-risk B2B accounts around and identifying expansion opportunities.
@@ -145,6 +147,20 @@ This section informs upsell_candidate and recommended_action.
 
    If no opportunity data is available, fall back to
    churn.next_renewal_date as the best available proxy for renewal timing.
+   TODAY'S DATE IS: {today_str}
+   Compute days_until_renewal = (churn.next_renewal_date - today). Rules:
+     - If days_until_renewal is NEGATIVE (the date has already passed),
+       renewal.is_renewal_soon MUST be false. A past date can never be
+       "due soon." State explicitly in drivers that the renewal date has
+       already passed and does not indicate an upcoming renewal.
+     - If days_until_renewal is POSITIVE and <= {UPSELL_RENEWAL_THRESHOLD_DAYS},
+       treat as renewal soon for Upsell purposes. If also <=
+       {HIGH_RISK_RENEWAL_THRESHOLD_DAYS}, it also satisfies the
+       High-risk renewal-soon condition (per Section 4).
+     - If days_until_renewal is POSITIVE and >
+       {UPSELL_RENEWAL_THRESHOLD_DAYS}, not soon.
+   Always state the actual days_until_renewal number in drivers when
+   this rule applies.
 
 ===========================================================
 ## SECTION 4 -- RISK LEVEL (follow this EXACTLY -- do not improvise)
@@ -193,11 +209,12 @@ generic ("reach out to the customer"). For Detractor/Passive accounts,
 this must reflect the Detractor-to-Promoter path from Section 2.
 
 ===========================================================
-## SECTION 7 -- CRITICAL OUTPUT RULES
+## SECTION 7 -- CRITICA L OUTPUT RULES
 ===========================================================
 - Return exactly one RiskClassification per entry in ACCOUNT_CONTEXT_LIST
   -- same count, no duplicates, no omissions.
 - account_id must exactly equal that account's account_id from the input.
+- account_name must exactly equal that account's account_name from the input.
 - nps_label must exactly equal that account's survey.label.
 - Use ONLY the data provided per account. Do not invent cases,
   opportunities, calls, or people not present in that account's context.
