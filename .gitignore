@@ -1,4 +1,16 @@
-.venv
+# Virtual environment
+.venv/
+
+# Environment variables
+.env
+.env.*
+
+# OAuth credentials
 auth/oauth_final.json
 auth/client_secret_*.json
-.env
+app_auth/oauth_final.json
+app_auth/client_secret_*.json
+
+# Python cache
+__pycache__/
+*.pyc
