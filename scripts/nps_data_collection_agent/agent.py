@@ -46,12 +46,17 @@ from urllib.parse import urlsplit
 from google.adk.agents import BaseAgent
 from google.adk.events import Event, EventActions
 from google.adk.runners import InMemoryRunner
-from google.auth.transport import requests as google_auth_requests
+#from google.auth.transport import requests as google_auth_requests
 from google.cloud import bigquery
-from google.oauth2 import id_token
+#from google.oauth2 import id_token
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
+# from google.auth.transport import requests as google_auth_requests
+# from google.auth import default as google_auth_default
+# from google.auth import impersonated_credentials
+from google.auth.transport import requests as google_auth_requests
+from google.oauth2 import id_token
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────

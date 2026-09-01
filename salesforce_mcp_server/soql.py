@@ -343,7 +343,7 @@ def build_leads_soql(lookback_days: int) -> str:
     created_date_field = LEAD_FIELD_MAP["created_date"]
     return (
         f"SELECT {fields} FROM {LEAD_OBJECT} "
-        f"WHERE {created_date_field} = LAST_N_DAYS:{int(lookback_days)}"
+        f"WHERE {created_date_field} >= LAST_N_DAYS:{int(lookback_days)}"
     )
 
 

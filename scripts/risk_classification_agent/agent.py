@@ -13,9 +13,18 @@ SESSION STATE:
   Writes -> ctx.session.state["risk_classification_results"] 
 """
 
+import os
+
+os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
+os.environ["GOOGLE_CLOUD_PROJECT"] = "atgeir-moae-dev"
+os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
+
+
+
 from google.adk.agents import LlmAgent
 from .prompt import RISK_CLASSIFICATION_PROMPT
 from .output_schema import RiskClassificationBatch
+from google.genai import types
 
 
 risk_classification_agent = LlmAgent(
@@ -24,7 +33,7 @@ risk_classification_agent = LlmAgent(
     name="risk_classification_agent",
 
     # Gemini model -- flash is fast and cost effective for this analysis
-    model="gemini-2.5-flash-lite",
+    model="gemini-3.5-flash",
 
     # The crucial prompt -- tells Gemini exactly how to classify each
     # account. Gemini reads account_context_list from session state
@@ -41,7 +50,15 @@ risk_classification_agent = LlmAgent(
     # Agent 4 reads ctx.session.state["risk_classification_results"]
     output_key="risk_classification_results",
 
+    
+
     # Exclude conversation history from Gemini API call -- sends only
     # the current instruction + input, reducing token size and latency
     include_contents='none',
+
+    generate_content_config=types.GenerateContentConfig(
+        temperature=0.1,
+        thinking_config=types.ThinkingConfig(thinking_budget=0),
+        
+    ),
 )

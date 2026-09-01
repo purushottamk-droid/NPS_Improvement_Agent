@@ -22,8 +22,8 @@ Do not add judgment calls or invent new rules.
 """
 
 import json
-HARDCODED_REP_EMAIL = "info@atgeirsolutions.com"
-HARDCODED_MANAGER_EMAIL = "info@atgeirsolutions.com"
+HARDCODED_REP_EMAIL = "purushottam.k@atgeirsolutions.com"
+HARDCODED_MANAGER_EMAIL = "purushottam.k@atgeirsolutions.com"
 
 
 
