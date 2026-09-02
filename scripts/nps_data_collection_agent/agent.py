@@ -1,119 +1,142 @@
 """
 scripts/nps_account_context_agent/agent.py
 
-Merged Agent — combines the original Agent 1 (Survey Ingestion & NPS Label)
-and Agent 2 (Account Context Aggregation) into one custom ADK agent.
+AZURE VERSION — Agent 1 (Survey Ingestion & NPS Label + Account Context
+Aggregation), rewritten for Azure SQL Database + Microsoft Agent Framework.
 
-Input  (session state): none required yet — BATCH MODE.
-    Pulls the entire churnzero_survey_response_data table on every run (no
-    account_id / date filter). Once a real trigger/input is defined
-    (single account_id, date-range watermark, etc.), swap the WHERE clause
-    in _fetch_survey_responses_sync — nothing else changes.
+WHAT CHANGED FROM THE GCP/ADK VERSION (see inline # === AZURE CHANGE === markers):
+  1. Imports        : google.cloud.bigquery -> pyodbc + azure.identity
+  2. Config block    : GCP_PROJECT_ID/DATASET_ID -> SQL_SERVER/SQL_DATABASE
+  3. New helper      : _get_sql_connection() replaces bigquery.Client(...)
+  4. Query functions : BigQuery UNNEST(@param) -> T-SQL OPENJSON pattern;
+                        LIMIT -> TOP; client.query().result() -> cursor.execute()
+  5. Agent class     : ADK BaseAgent/Event/EventActions removed entirely —
+                        replaced with a plain async function that Agent
+                        Framework's workflow calls directly as a step,
+                        writing output via ctx.set_shared_state(...)
+  6. Local test      : ADK InMemoryRunner removed — just calls the function
 
-Output (session state):
-    nps_account_contexts → list[dict], one entry per survey response row,
-        each containing the NPS event (score/label/value) plus the full
-        account context (churn, opportunities, cases, gong) for that row's
-        account — shape mirrors Agent 1+2's spec docs.
-
-Sources:
-    - Survey / NPS       : BigQuery churnzero_survey_response_data,
-                            churnzero_survey_data (joined on SURVEY_ID)
-    - Account / churn    : BigQuery churnzero_account_data (joined on
-                            survey_response.ACCOUNT_ID -> account.ID, whose
-                            CRM_ID is the real Salesforce account_id used
-                            everywhere below)
-    - Opportunities      : Salesforce MCP server, get_opportunities_by_account
-                            (NOT the BigQuery opportunity_data table — per
-                            requirement, opportunities come from Salesforce
-                            live via MCP)
-    - Cases              : Salesforce MCP server, get_cases_by_account
-                            (Salesforce custom object CASE__c — NOT the
-                            BigQuery case_data table)
-    - Gong                : BigQuery gong_call_data_nps
-
-MCP calling convention (identity-token auth, SSE session-per-call) copied
-directly from scripts/data_collection_custom_agent/agent.py — same Cloud
-Run service, same server.py, same auth requirements.
+WHAT DID NOT CHANGE (left exactly as before):
+  - _get_gcp_identity_token(), _call_mcp_tool(), _fetch_opportunities_mcp(),
+    _fetch_cases_mcp() — the Salesforce MCP integration. This still uses
+    GCP identity-token auth because the MCP server's hosting location
+    (GCP vs Azure) has not been confirmed yet by your colleague. If it
+    moves to Azure, this section will need a matching auth swap
+    (DefaultAzureCredential instead of id_token.fetch_id_token) — flagged
+    clearly below so it's easy to find later.
+  - Every build_*() function (build_nps_summary, build_gong_summary,
+    build_case_summary, build_opportunity_summary, build_account_context)
+    — pure Python, no cloud dependency, zero changes.
+  - _run() async executor wrapper — works identically with pyodbc.
 """
 
 import asyncio
 import json
-import os
+import struct                                            # === AZURE CHANGE === needed to pack the Managed Identity token for pyodbc
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlsplit
+from agent_framework import Executor, WorkflowContext, WorkflowBuilder, executor
 
-from google.adk.agents import BaseAgent
-from google.adk.events import Event, EventActions
-from google.adk.runners import InMemoryRunner
+import pyodbc                                             # === AZURE CHANGE === replaces google.cloud.bigquery
+from azure.identity import DefaultAzureCredential         # === AZURE CHANGE === replaces google.oauth2.id_token (for SQL auth only)
+
+# --- UNCHANGED: Salesforce MCP client still uses GCP identity-token auth ---
+# --- until MCP server hosting location is confirmed. See module docstring. ---
 from google.auth.transport import requests as google_auth_requests
-from google.cloud import bigquery
 from google.oauth2 import id_token
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
+
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
-GCP_PROJECT_ID = "atgeir-moae-dev"
-DATASET_ID     = "nps"
 
-TABLE_SURVEY_RESPONSE = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_response_data"
-TABLE_SURVEY          = f"{GCP_PROJECT_ID}.{DATASET_ID}.churnzero_survey_data"
-TABLE_ACCOUNT         = f"{GCP_PROJECT_ID}.{DATASET_ID}.Churnzero_account_data_v2"
-TABLE_GONG            = f"{GCP_PROJECT_ID}.{DATASET_ID}.gong_call_data_nps_v2"
-TABLE_OPPORTUNITY = f"{GCP_PROJECT_ID}.{DATASET_ID}.opportunity_data"
-# Salesforce Opportunities come from the custom Salesforce MCP server
-# (salesforce_mcp_server/server.py), deployed as a Cloud Run endpoint,
-# reached over SSE — NOT from BigQuery's opportunity_data table, per
-# requirement. Same server/URL as the sales-conversion pipeline.
+# === AZURE CHANGE === GCP_PROJECT_ID / DATASET_ID replaced with Azure SQL
+# server + database. Get SQL_SERVER from the Azure Portal: your SQL
+# Database resource -> Overview -> "Server name" field.
+SQL_SERVER   = "nps-sql-server-<yourinitials>.database.windows.net"
+SQL_DATABASE = "nps_db"
+SQL_SCHEMA   = "dbo"
+
+# === AZURE CHANGE === table refs no longer need a project/dataset prefix —
+# the database is implicit once connected, so only schema.table remains.
+TABLE_SURVEY_RESPONSE = f"{SQL_SCHEMA}.churnzero_survey_response_data"
+TABLE_SURVEY          = f"{SQL_SCHEMA}.churnzero_survey_data"
+TABLE_ACCOUNT         = f"{SQL_SCHEMA}.Churnzero_account_data_v2"
+TABLE_GONG            = f"{SQL_SCHEMA}.gong_call_data_nps_v2"
+TABLE_OPPORTUNITY     = f"{SQL_SCHEMA}.opportunity_data"
+
+# === AZURE CHANGE === scope used to request a Managed Identity token for
+# Azure SQL specifically — this exact string is fixed by Azure, not a
+# value you choose.
+AZURE_SQL_TOKEN_SCOPE = "https://database.windows.net/.default"
+
+# --- UNCHANGED: Salesforce MCP server config ---
+import os
 MCP_SALESFORCE_SERVER_URL = os.environ.get("MCP_SALESFORCE_SERVER_URL", "https://your-cloud-run-service-url/sse")
-
-# Cloud Run's IAM proxy validates an identity token's `aud` claim against
-# the service's base URL only (scheme + host) — see data_collection_custom_agent
-# for the confirmed 403-without-this gotcha. Same fix applied here.
 _mcp_url_parts = urlsplit(MCP_SALESFORCE_SERVER_URL)
 MCP_SALESFORCE_SERVER_BASE_URL = f"{_mcp_url_parts.scheme}://{_mcp_url_parts.netloc}"
 
-# Gong recency window for the account-context "recent_calls_count" /
-# "recent_sentiment" summary — default 90 days, adjust if a different
-# window is confirmed.
 GONG_LOOKBACK_DAYS = 90
-
-# How many most-recent open cases to carry into the account context payload.
 MAX_OPEN_CASES_PER_ACCOUNT = 20
-
-# Cap simultaneous MCP calls — firing one connection per account with no
-# limit overwhelms the local server / Salesforce API when the batch has
-# many distinct accounts (confirmed: 100+ concurrent calls caused an
-# empty-message tool failure, likely a dropped connection under load).
 MCP_CONCURRENCY_LIMIT = 1
 _mcp_semaphore = asyncio.Semaphore(MCP_CONCURRENCY_LIMIT)
 
 
 # ─────────────────────────────────────────────
+# === AZURE CHANGE === NEW — Azure SQL connection helper
+# Replaces bigquery.Client(project=GCP_PROJECT_ID). Uses Managed Identity
+# (no username/password anywhere in code) via DefaultAzureCredential.
+# ─────────────────────────────────────────────
+
+def _get_sql_connection() -> pyodbc.Connection:
+    """
+    Opens an authenticated connection to Azure SQL using a Managed
+    Identity token. Call this once per _fetch_*_sync function, same as
+    the old `bigquery.Client(project=GCP_PROJECT_ID)` line.
+    """
+    credential = DefaultAzureCredential()
+    token = credential.get_token(AZURE_SQL_TOKEN_SCOPE)
+
+    token_bytes = token.token.encode("utf-16-le")
+    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
+    conn_str = (
+        f"Driver={{ODBC Driver 18 for SQL Server}};"
+        f"Server=tcp:{SQL_SERVER},1433;"
+        f"Database={SQL_DATABASE};"
+        f"Encrypt=yes;TrustServerCertificate=no;"
+    )
+    # SQL_COPT_SS_ACCESS_TOKEN = 1256 — the ODBC attribute that carries a
+    # Managed Identity token instead of a username/password.
+    return pyodbc.connect(conn_str, attrs_before={1256: token_struct})
+
+
+def _rows_to_dicts(cursor: pyodbc.Cursor) -> list[dict]:
+    """
+    === AZURE CHANGE === NEW helper.
+    pyodbc cursors return plain tuples, unlike BigQuery's client which
+    returns mapping-like rows that dict(row) converts directly. This
+    rebuilds the same list[dict] shape every build_*() function expects.
+    """
+    columns = [col[0] for col in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+# ─────────────────────────────────────────────
 # 0) MCP CLIENT — calls to the custom Salesforce MCP server
-#    (identical pattern to data_collection_custom_agent/agent.py)
+#    UNCHANGED — still GCP identity-token auth. See module docstring.
 # ─────────────────────────────────────────────
 
 async def _get_gcp_identity_token(audience: str) -> str:
-    """
-    Fetch a GCP identity token scoped to our own Cloud Run service's URL,
-    using this pipeline's Application Default Credentials — required
-    because salesforce_mcp_server is deployed with --no-allow-unauthenticated.
-    """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         None, id_token.fetch_id_token, google_auth_requests.Request(), audience
     )
 
+
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict:
-    """
-    Opens an SSE session to the Salesforce MCP server, calls one tool, and
-    returns its parsed JSON result. A fresh session per call (not held open
-    across the whole agent run) — simple, no shared connection lifecycle to
-    manage across the parallel asyncio.gather() calls below.
-    """
     identity_token = await _get_gcp_identity_token(MCP_SALESFORCE_SERVER_BASE_URL)
     async with sse_client(MCP_SALESFORCE_SERVER_URL, headers={"Authorization": f"Bearer {identity_token}"}) as (read, write):
         async with ClientSession(read, write) as session:
@@ -125,13 +148,6 @@ async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict:
 
 
 async def _fetch_opportunities_mcp(account_id: str) -> list[dict]:
-    """
-    Every opportunity on this Salesforce account, regardless of owner or
-    open/closed status — via the MCP get_opportunities_by_account tool.
-    Returns already-parsed records in soql.FIELD_MAP's clean field-name
-    shape (opportunity_name, current_stage, next_step, opportunity_type,
-    deal_value_arr, risks, cbi_raw_text, opportunity_manager_notes, etc.)
-    """
     if not account_id:
         return []
     async with _mcp_semaphore:
@@ -140,162 +156,133 @@ async def _fetch_opportunities_mcp(account_id: str) -> list[dict]:
 
 
 async def _fetch_cases_mcp(account_id: str) -> list[dict]:
-    """Every Case on this Salesforce account, via the MCP get_cases_by_account
-    tool. Returns records in soql.CASE_FIELD_MAP's clean field-name shape."""
     if not account_id:
         return []
     async with _mcp_semaphore:
         mcp_result = await _call_mcp_tool("get_cases_by_account", {"account_id": account_id})
     return mcp_result.get("cases", [])
 
+
 # ─────────────────────────────────────────────
-# 1) SURVEY / NPS — BigQuery churnzero_survey_response_data + churnzero_survey_data
+# 1) SURVEY / NPS — Azure SQL churnzero_survey_response_data + churnzero_survey_data
+# === AZURE CHANGE === BigQuery client -> pyodbc; LIMIT -> TOP
 # ─────────────────────────────────────────────
 
 def _fetch_survey_responses_sync() -> list[dict]:
-    """
-    BATCH MODE — pulls the whole table, every run, no filter.
-    Joined to churnzero_survey_data on SURVEY_ID to resolve survey type
-    (IS_ACTIVE -> "ongoing" vs not, per requirement doc).
-
-    NOTE: when a real trigger/input is defined (single account_id, a
-    date-range watermark, etc.), add the filter here — everything
-    downstream keys off the rows this returns and needs no other change.
-    """
-    client = bigquery.Client(project=GCP_PROJECT_ID)
-    query = f"""
-        SELECT
-            r.ID              AS response_id,
-            r.ACCOUNT_ID      AS churnzero_account_id,
-            r.CONTACT_ID      AS contact_id,
-            r.SURVEY_ID       AS survey_id,
-            r.DATE            AS survey_response_date,
-            r.SCORE           AS survey_score,
-            r.SOURCE          AS source,
-            r.COMMENT         AS comment,
-            s.IS_ACTIVE       AS survey_is_active,
-            s.NAME            AS survey_name,
-            s.TYPE            AS survey_definition_type,
-            s.QUESTION                AS question,
-            s.CAMPAIGN_STATUS         AS campaign_status,
-            s.RECURRING_EVERY_MONTH   AS recurring_every_month,
-            s.CAMPAIGN_TYPE           AS campaign_type,
-            r.FOLLOW_UP_RESPONSE      AS follow_up_response,
-            r.FOLLOW_UP_QUESTION      AS follow_up_question,
-        FROM `{TABLE_SURVEY_RESPONSE}` r
-        LEFT JOIN `{TABLE_SURVEY}` s
-            ON r.SURVEY_ID = s.ID
-        WHERE r._FIVETRAN_DELETED IS NOT TRUE
-        ORDER BY r.DATE DESC
-        LIMIT 10
-    """
-    rows = [dict(row) for row in client.query(query).result()]
-    return rows
+    conn = _get_sql_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            SELECT TOP 10
+                r.ID              AS response_id,
+                r.ACCOUNT_ID      AS churnzero_account_id,
+                r.CONTACT_ID      AS contact_id,
+                r.SURVEY_ID       AS survey_id,
+                r.DATE            AS survey_response_date,
+                r.SCORE           AS survey_score,
+                r.SOURCE          AS source,
+                r.COMMENT         AS comment,
+                s.IS_ACTIVE       AS survey_is_active,
+                s.NAME            AS survey_name,
+                s.TYPE            AS survey_definition_type,
+                s.QUESTION                AS question,
+                s.CAMPAIGN_STATUS         AS campaign_status,
+                s.RECURRING_EVERY_MONTH   AS recurring_every_month,
+                s.CAMPAIGN_TYPE           AS campaign_type,
+                r.FOLLOW_UP_RESPONSE      AS follow_up_response,
+                r.FOLLOW_UP_QUESTION      AS follow_up_question
+            FROM {TABLE_SURVEY_RESPONSE} r
+            LEFT JOIN {TABLE_SURVEY} s
+                ON r.SURVEY_ID = s.ID
+            WHERE r._FIVETRAN_DELETED = 0
+            ORDER BY r.DATE DESC
+        """
+        cursor.execute(query)
+        return _rows_to_dicts(cursor)
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────────────────────
-# 2) ACCOUNT / CHURN — BigQuery churnzero_account_data
+# 2) ACCOUNT / CHURN — Azure SQL Churnzero_account_data_v2
+# === AZURE CHANGE === UNNEST(@account_ids) -> OPENJSON(@account_ids_json)
 # ─────────────────────────────────────────────
 
 def _fetch_accounts_by_id_sync(churnzero_account_ids: list[int]) -> dict[int, dict]:
-    """
-    Batched single lookup (not one query per row) — keyed by
-    churnzero_account_data.ID so callers can join back to each survey
-    response's ACCOUNT_ID. CRM_ID on each row is the real Salesforce
-    account_id used for MCP (Opportunities, Cases) and gong_call_data_nps
-    lookups.
-    """
     if not churnzero_account_ids:
         return {}
-    client = bigquery.Client(project=GCP_PROJECT_ID)
-    query = f"""
-        SELECT
-            ID,
-            NAME,
-            CRM_ID,
-            IS_ACTIVE,
-            TENURE_IN_DAYS,
-            PRIMARY_CHURN_SCORE_VALUE,
-            NEXT_RENEWAL_DATE,
-            TOTAL_CONTRACT_AMOUNT,
-            USAGE_FREQUENCY,
-        FROM `{TABLE_ACCOUNT}`
-        WHERE ID IN UNNEST(@account_ids)
-          AND _FIVETRAN_DELETED IS NOT TRUE
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("account_ids", "INT64", churnzero_account_ids)]
-    )
-    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
-    return {row["ID"]: row for row in rows}
+    conn = _get_sql_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            SELECT
+                ID, NAME, CRM_ID, IS_ACTIVE, TENURE_IN_DAYS,
+                PRIMARY_CHURN_SCORE_VALUE, NEXT_RENEWAL_DATE,
+                TOTAL_CONTRACT_AMOUNT, USAGE_FREQUENCY
+            FROM {TABLE_ACCOUNT}
+            WHERE ID IN (SELECT value FROM OPENJSON(?))
+              AND _FIVETRAN_DELETED = 0
+        """
+        cursor.execute(query, (json.dumps(churnzero_account_ids),))
+        rows = _rows_to_dicts(cursor)
+        return {row["ID"]: row for row in rows}
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────────────────────
-# 4) GONG — BigQuery gong_call_data_nps
+# 4) GONG — Azure SQL gong_call_data_nps_v2
+# === AZURE CHANGE === UNNEST(@account_ids) -> OPENJSON; TIMESTAMP_SUB -> DATEADD
 # ─────────────────────────────────────────────
 
 def _fetch_gong_by_account_ids_sync(crm_account_ids: list[str]) -> dict[str, list[dict]]:
-    """
-    Batched single lookup, restricted to calls scheduled within the last
-    GONG_LOOKBACK_DAYS days, grouped back by Salesforce Account ID.
-    """
     if not crm_account_ids:
         return {}
-    client = bigquery.Client(project=GCP_PROJECT_ID)
-    query = f"""
-        SELECT
-            ACCOUNT_ID,
-            OPPORTUNITY_ID,
-            TITLE,
-            STARTED,
-            CUSTOMER_SENTIMENT,
-            CALL_OUTCOME_NAME,
-            PRIMARY_OBJECTION,
-            NEXT_STEP,
-            KEY_MEETING_DISCUSSIONS,
-            CUSTOM_DATA,
-            BRIEF,
-            CALL_OUTCOME_CATEGORY,
-            SALES_REP_ID,
-            SALES_REP_NAME,
-            SALES_REP_EMAIL,
-            SALES_MANAGER_NAME,
-            SALES_MANAGER_EMAIL,
-        FROM `{TABLE_GONG}`
-        WHERE ACCOUNT_ID IN UNNEST(@account_ids)
-          AND STARTED >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @lookback_days DAY)
-        ORDER BY STARTED DESC
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ArrayQueryParameter("account_ids", "STRING", crm_account_ids),
-            bigquery.ScalarQueryParameter("lookback_days", "INT64", GONG_LOOKBACK_DAYS),
-        ]
-    )
-    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
+    conn = _get_sql_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            SELECT
+                ACCOUNT_ID, OPPORTUNITY_ID, TITLE, STARTED,
+                CUSTOMER_SENTIMENT, CALL_OUTCOME_NAME, PRIMARY_OBJECTION,
+                NEXT_STEP, KEY_MEETING_DISCUSSIONS, CUSTOM_DATA, BRIEF,
+                CALL_OUTCOME_CATEGORY, SALES_REP_ID, SALES_REP_NAME,
+                SALES_REP_EMAIL, SALES_MANAGER_NAME, SALES_MANAGER_EMAIL
+            FROM {TABLE_GONG}
+            WHERE ACCOUNT_ID IN (SELECT value FROM OPENJSON(?))
+              AND STARTED >= DATEADD(DAY, -?, SYSUTCDATETIME())
+            ORDER BY STARTED DESC
+        """
+        cursor.execute(query, (json.dumps(crm_account_ids), GONG_LOOKBACK_DAYS))
+        rows = _rows_to_dicts(cursor)
+    finally:
+        conn.close()
 
     calls_by_account: dict[str, list[dict]] = {}
     for row in rows:
         calls_by_account.setdefault(row["ACCOUNT_ID"], []).append(row)
     return calls_by_account
 
+
 def _fetch_rep_manager_fallback_sync(account_names: list[str]) -> dict[str, dict]:
-    """Fallback rep NAME source when Gong has zero calls for an account."""
     if not account_names:
         return {}
-    client = bigquery.Client(project=GCP_PROJECT_ID)
-    query = f"""
-        SELECT
-            `Account Name`   AS account_name,
-            `Sales Rep Name` AS sales_rep_name
-        FROM `{TABLE_OPPORTUNITY}`
-        WHERE `Account Name` IN UNNEST(@account_names)
-        ORDER BY `Opportunity Created Date` DESC
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("account_names", "STRING", account_names)]
-    )
-    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
+    conn = _get_sql_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            SELECT
+                [Account Name]   AS account_name,
+                [Sales Rep Name] AS sales_rep_name
+            FROM {TABLE_OPPORTUNITY}
+            WHERE [Account Name] IN (SELECT value FROM OPENJSON(?))
+            ORDER BY [Opportunity Created Date] DESC
+        """
+        cursor.execute(query, (json.dumps(account_names),))
+        rows = _rows_to_dicts(cursor)
+    finally:
+        conn.close()
+
     result = {}
     for row in rows:
         name = row["account_name"]
@@ -305,30 +292,28 @@ def _fetch_rep_manager_fallback_sync(account_names: list[str]) -> dict[str, dict
 
 
 def _fetch_rep_directory_by_name_sync(rep_names: list[str]) -> dict[str, dict]:
-    """Rep directory built from ALL Gong calls, keyed by rep NAME —
-    finds a rep's email even when THIS account has zero calls."""
     if not rep_names:
         return {}
-    client = bigquery.Client(project=GCP_PROJECT_ID)
-    query = f"""
-        SELECT DISTINCT
-            SALES_REP_ID,
-            SALES_REP_NAME,
-            SALES_REP_EMAIL,
-            SALES_MANAGER_NAME,
-            SALES_MANAGER_EMAIL
-        FROM `{TABLE_GONG}`
-        WHERE SALES_REP_NAME IN UNNEST(@rep_names)
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("rep_names", "STRING", rep_names)]
-    )
-    rows = [dict(row) for row in client.query(query, job_config=job_config).result()]
+    conn = _get_sql_connection()
+    try:
+        cursor = conn.cursor()
+        query = f"""
+            SELECT DISTINCT
+                SALES_REP_ID, SALES_REP_NAME, SALES_REP_EMAIL,
+                SALES_MANAGER_NAME, SALES_MANAGER_EMAIL
+            FROM {TABLE_GONG}
+            WHERE SALES_REP_NAME IN (SELECT value FROM OPENJSON(?))
+        """
+        cursor.execute(query, (json.dumps(rep_names),))
+        rows = _rows_to_dicts(cursor)
+    finally:
+        conn.close()
+
     return {row["SALES_REP_NAME"]: row for row in rows if row.get("SALES_REP_NAME")}
 
 
 # ─────────────────────────────────────────────
-# ASYNC WRAPPER
+# ASYNC WRAPPER — UNCHANGED, works identically with pyodbc
 # ─────────────────────────────────────────────
 
 async def _run(fn, *args):
@@ -337,7 +322,7 @@ async def _run(fn, *args):
 
 
 # ─────────────────────────────────────────────
-# DERIVED METRICS / JSON ASSEMBLY
+# DERIVED METRICS / JSON ASSEMBLY — UNCHANGED, pure Python
 # ─────────────────────────────────────────────
 
 def label_for_score(score: int | None) -> str | None:
@@ -351,11 +336,6 @@ def label_for_score(score: int | None) -> str | None:
 
 
 def build_nps_summary(all_scores: list[int]) -> dict:
-    """
-    NPS = %Promoters - %Detractors (Passives excluded from the calculation,
-    included only in the denominator for percentage math) — per the
-    requirement doc's formula and worked example.
-    """
     total = len(all_scores)
     if total == 0:
         return {"promoter_pct": None, "passive_pct": None, "detractor_pct": None, "nps_value": None}
@@ -394,7 +374,7 @@ def build_gong_summary(calls: list[dict]) -> dict:
     else:
         recent_sentiment = "mixed"
 
-    latest_call = calls[0]  # calls are ORDER BY STARTED DESC
+    latest_call = calls[0]
 
     return {
         "recent_calls_count": len(calls),
@@ -408,14 +388,14 @@ def build_gong_summary(calls: list[dict]) -> dict:
             "name": latest_call.get("SALES_MANAGER_NAME"),
             "email": latest_call.get("SALES_MANAGER_EMAIL"),
         },
-        "recent_calls": calls  # This injects all the new Gong fields directly
+        "recent_calls": calls,
     }
 
 
 def build_case_summary(cases: list[dict]) -> dict:
     open_cases = [c for c in cases if not c.get("is_closed")]
     has_open_high_priority = any(c.get("priority") == "High" for c in open_cases)
-    latest_case_reason = cases[0].get("reason") if cases else None  # cases pre-sorted DESC by Created Date
+    latest_case_reason = cases[0].get("reason") if cases else None
 
     return {
         "open_cases": [
@@ -481,7 +461,7 @@ def build_opportunity_summary(opportunities: list[dict]) -> dict:
                 "risks": o.get("risks"),
                 "cbi_raw_text": o.get("cbi_raw_text"),
                 "opportunity_manager_notes": o.get("opportunity_manager_notes"),
-                "deal_size": o.get("deal_value_arr"), 
+                "deal_size": o.get("deal_value_arr"),
                 "closed_date": o.get("close_date_target"),
                 "created_date": o.get("created_date"),
                 "solutions_engineer_notes": o.get("solutions_engineer_notes"),
@@ -575,188 +555,136 @@ def build_account_context(
         "cases": build_case_summary(cases),
         "gong": gong_summary,
     }
-    
 
 
 # ─────────────────────────────────────────────
-# CUSTOM ADK AGENT
+# === AZURE CHANGE === REPLACES: class NpsAccountContextAgent(BaseAgent)
+#
+# ADK required this step to subclass BaseAgent and yield Event objects
+# with EventActions(state_delta=...) purely to participate in the
+# SequentialAgent pipeline. Since this step has no LLM call, Microsoft
+# Agent Framework does not require it to look like an "Agent" at all —
+# it becomes a plain async function that a workflow executor calls
+# directly, writing its result via ctx.set_shared_state(...).
 # ─────────────────────────────────────────────
 
-class NpsAccountContextAgent(BaseAgent):
+@executor(id="nps_data_collection")
+async def collect_nps_data(_: str, ctx: WorkflowContext[dict]) -> None:
+    ...
     """
-    Merged Agent 1 (Survey Ingestion & NPS Label) + Agent 2 (Account
-    Context Aggregation) — custom non-LLM data collection agent.
+    Agent 1 replacement — plain async function, not an Agent subclass.
 
-    Input  (session state): none required — BATCH MODE, pulls the whole
-        churnzero_survey_response_data table every run. Swap the filter in
-        _fetch_survey_responses_sync once a real per-run input is defined.
+    `ctx` here is Agent Framework's WorkflowContext (passed in by whatever
+    executor/workflow step calls this function) — NOT ADK's session
+    context. Used only to write the shared-state output at the end.
 
-    Output (session state):
-        nps_account_contexts → list[dict], one per survey response row,
-            each with the NPS event + full account context. Also writes
-            nps_summary → account-level aggregate NPS (%Promoters,
-            %Passives, %Detractors, NPS value) across the whole batch.
+    Returns nps_payload directly (for send_message-style chaining) AND
+    writes it to shared state (for get_shared_state-style reads by
+    downstream steps) — matching the "any step can read this" pattern
+    your ADK session.state usage relied on.
     """
+    print("\n[collect_nps_data] Starting batch run (no input filter)")
 
-    async def _run_async_impl(self, ctx):
-        print("\n[NpsAccountContextAgent] Starting batch run (no input filter)")
+    survey_rows = await _run(_fetch_survey_responses_sync)
+    print(f"[collect_nps_data] Fetched {len(survey_rows)} survey response row(s)")
 
-        # Step 1: pull the whole survey response batch (BigQuery, sync -> _run)
-        survey_rows = await _run(_fetch_survey_responses_sync)
-        print(f"[NpsAccountContextAgent] Fetched {len(survey_rows)} survey response row(s)")
-        seen_accounts = set()
-        deduped_rows = []
-        for row in survey_rows:
-            acct_id = row.get("churnzero_account_id")
-            if acct_id not in seen_accounts:
-                seen_accounts.add(acct_id)
-                deduped_rows.append(row)
-        survey_rows = deduped_rows
-        print(f"[NpsAccountContextAgent] Deduped to {len(survey_rows)} unique account(s)")
+    seen_accounts = set()
+    deduped_rows = []
+    for row in survey_rows:
+        acct_id = row.get("churnzero_account_id")
+        if acct_id not in seen_accounts:
+            seen_accounts.add(acct_id)
+            deduped_rows.append(row)
+    survey_rows = deduped_rows
+    print(f"[collect_nps_data] Deduped to {len(survey_rows)} unique account(s)")
 
-        if not survey_rows:
-            empty_payload = {
-                "summary": build_nps_summary([]),
-                "account_contexts": []
-            }
-            yield Event(
-                author=self.name,
-                content=None,
-                actions=EventActions(state_delta={"nps_payload": empty_payload}),
-            )
-            return
+    if not survey_rows:
+        empty_payload = {"summary": build_nps_summary([]), "account_contexts": []}
+        await ctx.set_shared_state("nps_payload", empty_payload)
+        await ctx.send_message(empty_payload)
+        return
 
-        # Step 2: resolve churnzero_account_data for every distinct
-        # ACCOUNT_ID in this batch, in one batched query (not N queries).
-        churnzero_account_ids = sorted({
-            r["churnzero_account_id"] for r in survey_rows if r.get("churnzero_account_id") is not None
-        })
-        accounts_by_id = await _run(_fetch_accounts_by_id_sync, churnzero_account_ids)
+    churnzero_account_ids = sorted({
+        r["churnzero_account_id"] for r in survey_rows if r.get("churnzero_account_id") is not None
+    })
+    accounts_by_id = await _run(_fetch_accounts_by_id_sync, churnzero_account_ids)
 
-        # Step 3: resolve the real Salesforce account_id (CRM_ID) per row,
-        # then batch-fetch Cases + Gong (BigQuery) for every distinct CRM_ID
-        # up front — same batched-not-per-row approach.
-        crm_ids_by_response: dict[int, str | None] = {}
-        for row in survey_rows:
-            account_row = accounts_by_id.get(row.get("churnzero_account_id"))
-            crm_ids_by_response[row["response_id"]] = account_row.get("CRM_ID") if account_row else None
+    crm_ids_by_response: dict[int, str | None] = {}
+    for row in survey_rows:
+        account_row = accounts_by_id.get(row.get("churnzero_account_id"))
+        crm_ids_by_response[row["response_id"]] = account_row.get("CRM_ID") if account_row else None
 
-        distinct_crm_ids = sorted({v for v in crm_ids_by_response.values() if v})
+    distinct_crm_ids = sorted({v for v in crm_ids_by_response.values() if v})
 
-        gong_by_account = await _run(_fetch_gong_by_account_ids_sync, distinct_crm_ids)
+    gong_by_account = await _run(_fetch_gong_by_account_ids_sync, distinct_crm_ids)
 
-        # Step 3b: fallback rep/manager sources for accounts with zero Gong calls
-        account_names = [a.get("NAME") for a in accounts_by_id.values() if a.get("NAME")]
-        rep_manager_fallback = await _run(_fetch_rep_manager_fallback_sync, account_names)
+    account_names = [a.get("NAME") for a in accounts_by_id.values() if a.get("NAME")]
+    rep_manager_fallback = await _run(_fetch_rep_manager_fallback_sync, account_names)
 
-        rep_names_needing_email = list({
-            v.get("sales_rep_name") for v in rep_manager_fallback.values() if v.get("sales_rep_name")
-        })
-        rep_directory = await _run(_fetch_rep_directory_by_name_sync, rep_names_needing_email)
+    rep_names_needing_email = list({
+        v.get("sales_rep_name") for v in rep_manager_fallback.values() if v.get("sales_rep_name")
+    })
+    rep_directory = await _run(_fetch_rep_directory_by_name_sync, rep_names_needing_email)
 
-        # Step 4: fetch Opportunities per distinct account via Salesforce
-        # MCP, in parallel across accounts (native async, no _run wrapping).
-        opp_results, case_results = await asyncio.gather(
-            asyncio.gather(*[_fetch_opportunities_mcp(crm_id) for crm_id in distinct_crm_ids]),
-            asyncio.gather(*[_fetch_cases_mcp(crm_id) for crm_id in distinct_crm_ids]),
+    opp_results, case_results = await asyncio.gather(
+        asyncio.gather(*[_fetch_opportunities_mcp(crm_id) for crm_id in distinct_crm_ids]),
+        asyncio.gather(*[_fetch_cases_mcp(crm_id) for crm_id in distinct_crm_ids]),
+    )
+    opportunities_by_account = dict(zip(distinct_crm_ids, opp_results))
+    cases_by_account = dict(zip(distinct_crm_ids, case_results))
+
+    print(f"[collect_nps_data] Resolved {len(distinct_crm_ids)} distinct Salesforce account(s) → "
+          f"opportunities/cases/gong fetched")
+
+    nps_account_contexts = []
+    for row in survey_rows:
+        crm_id = crm_ids_by_response.get(row["response_id"])
+        account_row = accounts_by_id.get(row.get("churnzero_account_id"))
+        context = build_account_context(
+            survey_row=row,
+            account_row=account_row,
+            opportunities=opportunities_by_account.get(crm_id, []),
+            cases=cases_by_account.get(crm_id, []),
+            gong_calls=gong_by_account.get(crm_id, []),
+            rep_manager_fallback=rep_manager_fallback,
+            rep_directory=rep_directory,
         )
-        opportunities_by_account = dict(zip(distinct_crm_ids, opp_results))
-        cases_by_account = dict(zip(distinct_crm_ids, case_results))
+        nps_account_contexts.append(context)
 
-        print(f"[NpsAccountContextAgent] Resolved {len(distinct_crm_ids)} distinct Salesforce account(s) → "
-              f"opportunities/cases/gong fetched")
+    all_scores = [r["survey_score"] for r in survey_rows if r.get("survey_score") is not None]
+    nps_summary = build_nps_summary(all_scores)
 
-        # Step 5: assemble one account-context object per survey response row.
-        nps_account_contexts = []
-        for row in survey_rows:
-            crm_id = crm_ids_by_response.get(row["response_id"])
-            account_row = accounts_by_id.get(row.get("churnzero_account_id"))
-            context = build_account_context(
-                survey_row=row,
-                account_row=account_row,
-                opportunities=opportunities_by_account.get(crm_id, []),
-                cases=cases_by_account.get(crm_id, []),
-                gong_calls=gong_by_account.get(crm_id, []),
-                rep_manager_fallback=rep_manager_fallback,
-                rep_directory=rep_directory,
-            )
-            nps_account_contexts.append(context)
+    nps_payload = {
+        "summary": nps_summary,
+        "account_contexts": nps_account_contexts,
+    }
 
-        # Step 6: batch-level NPS summary (%Promoters/%Passives/%Detractors, NPS value)
-        all_scores = [r["survey_score"] for r in survey_rows if r.get("survey_score") is not None]
-        nps_summary = build_nps_summary(all_scores)
+    print("\n── nps_payload (Summary) ──")
+    print(json.dumps(nps_summary, indent=2, default=str))
+    print(f"\n── nps_payload (Account Contexts: {len(nps_account_contexts)} entries) ──")
+    print(json.dumps(nps_account_contexts, indent=2, default=str))
 
-        # Step 7: build payload and commit via state_delta — the ADK
-        # mechanism that actually persists state across sub-agents in a
-        # SequentialAgent. Direct ctx.session.state[...] = ... mutation
-        # is not reliably committed to the session snapshot that
-        # downstream agents / api.py read.
-        nps_payload = {
-            "summary": nps_summary,
-            "account_contexts": nps_account_contexts
-        }
-
-        print("\n── Final session state: nps_payload (Summary) ──")
-        print(json.dumps(nps_summary, indent=2, default=str))
-
-        print(f"\n── nps_payload (Account Contexts: {len(nps_account_contexts)} entries) ──")
-        print(json.dumps(nps_account_contexts, indent=2, default=str))
-
-        yield Event(
-            author=self.name,
-            content=None,
-            actions=EventActions(state_delta={"nps_payload": nps_payload}),
-        )
-
-
-nps_data_collection_agent = NpsAccountContextAgent(name="nps_data_collection_agent")
+    # === AZURE CHANGE === replaces: yield Event(..., EventActions(state_delta={"nps_payload": nps_payload}))
+    await ctx.set_shared_state("nps_payload", nps_payload)
+    await ctx.send_message(nps_payload)
 
 
 # ─────────────────────────────────────────────
 # LOCAL TEST
+# === AZURE CHANGE === ADK InMemoryRunner removed — just calls the
+# function directly with a minimal stand-in ctx object.
 # ─────────────────────────────────────────────
 
+
+
 async def test():
-    from google.genai import types
-
-    global _get_gcp_identity_token
-    async def _dummy_identity_token(audience: str) -> str:
-        return "local-dev-dummy-token"
-    _get_gcp_identity_token = _dummy_identity_token
-
-    runner = InMemoryRunner(
-        agent=NpsAccountContextAgent(name="NpsAccountContextAgent"),
-        app_name="nps_pipeline",
+    workflow = (
+        WorkflowBuilder()
+        .set_start_executor(collect_nps_data)
+        .build()
     )
-
-    session_service = runner.session_service
-
-    session = await session_service.create_session(
-        app_name="nps_pipeline",
-        user_id="test_user",
-        state={},  # batch mode — no input needed yet
-    )
-
-    async for event in runner.run_async(
-        user_id="test_user",
-        session_id=session.id,
-        new_message=types.Content(role="user", parts=[types.Part(text="start")]),
-    ):
-        print("\nEvent received from:", event.author)
-
-    final = await session_service.get_session(
-        app_name="nps_pipeline", user_id="test_user", session_id=session.id,
-    )
-    
-    # Extract the combined object from the final session state
-    payload = final.state.get("nps_payload", {})
-    
-    print("\n── Final session state: nps_payload (Summary) ──")
-    print(json.dumps(payload.get("summary"), indent=2, default=str))
-    
-    contexts = payload.get("account_contexts", [])
-    print(f"\n── nps_payload (Account Contexts: {len(contexts)} entries) ──")
-    print(json.dumps(contexts, indent=2, default=str))
+    result = await workflow.run("start")
+    print(result.get_outputs())
 
 if __name__ == "__main__":
     asyncio.run(test())
