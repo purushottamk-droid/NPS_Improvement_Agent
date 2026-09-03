@@ -1,15 +1,14 @@
-from google.adk.agents import SequentialAgent
+from agent_framework import WorkflowBuilder
 
+from scripts.nps_data_collection_agent.agent import collect_nps_data
+from scripts.risk_classification_agent.agent import classify_risk
+from scripts.action_agent.agent import take_actions                                          
 
-from scripts.nps_data_collection_agent.agent import NpsAccountContextAgent
-from scripts.risk_classification_agent import risk_classification_agent                
-from scripts.action_agent import action_agent                                          
-
-root_agent = SequentialAgent(
-    name="nps_improvement_pipeline",
-    sub_agents=[
-        NpsAccountContextAgent(name="nps_data_collection_agent"),
-        risk_classification_agent,          
-        action_agent,                       
-    ]
+workflow = (
+    WorkflowBuilder()
+    .set_start_executor(collect_nps_data)
+    .add_edge(collect_nps_data, classify_risk)
+    .add_edge(classify_risk, take_actions)
+    .build()
 )
+

@@ -13,35 +13,28 @@ SESSION STATE:
   Writes -> ctx.session.state["risk_classification_results"] 
 """
 
-from google.adk.agents import LlmAgent
+
+from agent_framework import WorkflowContext, executor
+from agent_framework.azure import AzureOpenAIChatClient
+from azure.identity import DefaultAzureCredential
 from .prompt import RISK_CLASSIFICATION_PROMPT
 from .output_schema import RiskClassificationBatch
 
 
-risk_classification_agent = LlmAgent(
+chat_client = AzureOpenAIChatClient(credential=DefaultAzureCredential())
+risk_agent = chat_client.as_agent(name="risk_classification_agent")
 
-    # Agent identity -- used by ADK pipeline to identify this agent
-    name="risk_classification_agent",
 
-    # Gemini model -- flash is fast and cost effective for this analysis
-    model="gemini-2.5-flash-lite",
+@executor(id="risk_classification")
+async def classify_risk(nps_payload: dict, ctx: WorkflowContext[dict]) -> None:
+    instructions_text = RISK_CLASSIFICATION_PROMPT(nps_payload)
 
-    # The crucial prompt -- tells Gemini exactly how to classify each
-    # account. Gemini reads account_context_list from session state
-    # automatically. Full prompt logic is in prompt.py
-    instruction=RISK_CLASSIFICATION_PROMPT,
+    response = await risk_agent.run(
+        instructions_text,
+        response_format=RiskClassificationBatch,
+        temperature=0.1,
+    )
+    result = response.value
 
-    # Pydantic schema -- Gemini MUST return output matching this structure
-    # RiskClassificationBatch contains list of RiskClassification --
-    # one result per account -- even though it is one Gemini call
-    # Defined in output_schema.py
-    output_schema=RiskClassificationBatch,
-
-    # Where LlmAgent writes the result in session state
-    # Agent 4 reads ctx.session.state["risk_classification_results"]
-    output_key="risk_classification_results",
-
-    # Exclude conversation history from Gemini API call -- sends only
-    # the current instruction + input, reducing token size and latency
-    include_contents='none',
-)
+    await ctx.set_shared_state("risk_classification_results", result)
+    await ctx.send_message(result)

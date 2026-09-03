@@ -18,9 +18,8 @@ access itself, same separation of concerns as decision_action_agent.
 import base64
 from email.mime.text import MIMEText
 
-from google.adk.tools import FunctionTool, ToolContext
-
-from app_auth.auth import build_gmail_service
+from agent_framework import ai_function
+from app_auth.auth import build_graph_client
 
 
 def _build_mime_email(to: str, subject: str, body_html: str) -> str:
@@ -35,10 +34,10 @@ def _build_mime_email(to: str, subject: str, body_html: str) -> str:
 # TOOL 1 — Notify manager (Gmail API)
 # ---------------------------------------------------------------------
 
+@ai_function
 async def notify_manager(
     manager_email: str,
     reps_detractor_summary: str,
-    tool_context: ToolContext,
 ) -> dict:
     """Send ONE consolidated email to the manager covering ALL reps'
     Detractor accounts across the whole batch.
@@ -69,18 +68,21 @@ async def notify_manager(
     """
 
     try:
-        service = build_gmail_service()
-        raw = _build_mime_email(manager_email, subject, body_html)
-        sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-
+        client = build_graph_client()
+        await client.me.send_mail.post({
+            "message": {
+                "subject": subject,
+                "body": {"contentType": "HTML", "content": body_html},
+                "toRecipients": [{"emailAddress": {"address": manager_email}}],
+            }
+        })
         return {
             "status": "SENT",
             "type": "notify_manager",
             "manager_email": manager_email,
             "subject": subject,
-            "message_id": sent.get("id"),
+            "message_id": None,   # Graph's sendMail returns no body/ID on success — see note below
         }
-
     except Exception as e:
         return {
             "status": "ERROR",
@@ -162,9 +164,3 @@ async def message_rep(
         }
 
 
-# ---------------------------------------------------------------------
-# FunctionTool wrappers
-# ---------------------------------------------------------------------
-
-notify_manager_tool = FunctionTool(func=notify_manager)
-message_rep_tool = FunctionTool(func=message_rep)

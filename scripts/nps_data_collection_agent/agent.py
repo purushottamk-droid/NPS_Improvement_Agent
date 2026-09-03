@@ -55,9 +55,9 @@ from mcp.client.sse import sse_client
 # === AZURE CHANGE === GCP_PROJECT_ID / DATASET_ID replaced with Azure SQL
 # server + database. Get SQL_SERVER from the Azure Portal: your SQL
 # Database resource -> Overview -> "Server name" field.
-SQL_SERVER   = "nps-sql-server-<yourinitials>.database.windows.net"
-SQL_DATABASE = "nps_db"
-SQL_SCHEMA   = "dbo"
+SQL_SERVER = "atg-agents-server.database.windows.net"
+SQL_DATABASE = "atg-agents-db"
+SQL_SCHEMA = "nps"
 
 # === AZURE CHANGE === table refs no longer need a project/dataset prefix —
 # the database is implicit once connected, so only schema.table remains.
@@ -137,8 +137,10 @@ async def _get_gcp_identity_token(audience: str) -> str:
 
 
 async def _call_mcp_tool(tool_name: str, arguments: dict) -> dict:
-    identity_token = await _get_gcp_identity_token(MCP_SALESFORCE_SERVER_BASE_URL)
-    async with sse_client(MCP_SALESFORCE_SERVER_URL, headers={"Authorization": f"Bearer {identity_token}"}) as (read, write):
+    # TEMP: no auth — salesforce-mcp-server has no identity provider configured
+    # yet on Container Apps (Easy Auth not set up). Circle back and restore
+    # a proper Authorization header once that's locked down.
+    async with sse_client(MCP_SALESFORCE_SERVER_URL) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)

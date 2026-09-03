@@ -20,7 +20,7 @@ NEW_SELL_CROSS_UPSELL_MAX_MONTHS = 9
 RENEWAL_EMAIL_LEAD_MONTHS = 3
 
 
-def RISK_CLASSIFICATION_PROMPT(ctx) -> str:
+def RISK_CLASSIFICATION_PROMPT(nps_payload: dict) -> str:
     """
     InstructionProvider -- called by ADK at runtime.
     Reads account_context_list from session state. Shape (per entry):
@@ -35,7 +35,7 @@ def RISK_CLASSIFICATION_PROMPT(ctx) -> str:
       }
     """
     
-    nps_payload = ctx.state.get("nps_payload") or {}
+    nps_payload = nps_payload or {}
     account_context_list = nps_payload.get("account_contexts", [])
     today_str = date.today().isoformat()
     return f"""

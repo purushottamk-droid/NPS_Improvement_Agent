@@ -1,7 +1,3 @@
-import os
-os.environ["GOOGLE_CLOUD_PROJECT"] = "atgeir-moae-dev"
-os.environ["GOOGLE_CLOUD_LOCATION"] = "us-central1"
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "1"
 
 import json
 from fastapi import FastAPI, HTTPException
@@ -9,14 +5,8 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.adk.agents.run_config import RunConfig, StreamingMode
-from google.genai import types
-
-# Import the NPS agent we built
-# (If you wrapped this in SequentialAgent.py, change this to: from scripts.SequentialAgent import root_agent)
-from scripts.SequentialAgent import root_agent
+from agent_framework import WorkflowOutputEvent, WorkflowFailedEvent
+from scripts.SequentialAgent import workflow
 
 # ─────────────────────────────────────────────
 # App setup
@@ -37,15 +27,7 @@ api.add_middleware(
     expose_headers=["*"],
 )
 
-session_service = InMemorySessionService()
 
-
-
-runner = Runner(
-    agent=root_agent,
-    app_name="nps_pipeline",
-    session_service=session_service,
-)
 
 
 # ─────────────────────────────────────────────

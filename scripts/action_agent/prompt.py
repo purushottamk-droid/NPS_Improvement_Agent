@@ -30,9 +30,9 @@ HARDCODED_MANAGER_EMAIL = "info@atgeirsolutions.com"
 
 
 
-def ACTION_PROMPT(ctx) -> str:
-    classifications = (ctx.state.get("risk_classification_results") or {}).get("classifications", [])
-    account_context_list = (ctx.state.get("nps_payload") or {}).get("account_contexts", [])
+def ACTION_PROMPT(risk_classification_results: dict, nps_payload: dict) -> str:
+    classifications = (risk_classification_results or {}).get("classifications", [])
+    account_context_list = (nps_payload or {}).get("account_contexts", [])
     rep_email = HARDCODED_REP_EMAIL
     manager_email = HARDCODED_MANAGER_EMAIL
     
